@@ -95,7 +95,9 @@ def get_sentiment(ticker: str) -> tuple[float, list]:
         news = yf.Ticker(ticker).news or []
         headlines, scores = [], []
         for a in news[:10]:
-            title = a.get("title", "")
+            # yfinance ≥0.2.x wraps article data under a "content" dict
+            content = a.get("content", a)
+            title = content.get("title", "") or a.get("title", "")
             score = TextBlob(title).sentiment.polarity
             headlines.append({"title": title, "score": round(score, 3)})
             scores.append(score)
