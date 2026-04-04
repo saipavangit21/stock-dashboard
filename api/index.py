@@ -32,6 +32,7 @@ _lock  = threading.Lock()
 
 STOCKS     = ["AAPL", "MSFT", "TSLA", "NVDA"]
 START_DATE = "2022-01-01"   # 2 years keeps training fast for serverless
+SR_START   = "2018-01-01"   # 6+ years of history for support/resistance
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -47,6 +48,8 @@ def compute_features(ticker: str) -> pd.DataFrame:
 
     df = pd.DataFrame()
     df["Close"]  = raw["Close"].squeeze()
+    df["High"]   = raw["High"].squeeze()
+    df["Low"]    = raw["Low"].squeeze()
     df["Volume"] = raw["Volume"].squeeze()
 
     # Returns
@@ -95,9 +98,15 @@ def get_sentiment(ticker: str) -> tuple[float, list]:
         news = yf.Ticker(ticker).news or []
         headlines, scores = [], []
         for a in news[:10]:
-            # yfinance ≥0.2.x wraps article data under a "content" dict
-            content = a.get("content", a)
-            title = content.get("title", "") or a.get("title", "")
+            # yfinance changed its news structure — try all known formats
+            title = (
+                a.get("title")
+                or a.get("content", {}).get("title")
+                or a.get("headline")
+                or ""
+            )
+            if not title:
+                continue
             score = TextBlob(title).sentiment.polarity
             headlines.append({"title": title, "score": round(score, 3)})
             scores.append(score)
@@ -105,6 +114,80 @@ def get_sentiment(ticker: str) -> tuple[float, list]:
         return avg, headlines
     except Exception:
         return 0.0, []
+
+
+def get_support_resistance(ticker: str, current_price: float) -> dict:
+    """
+    Find historical support & resistance levels from 6+ years of price data.
+
+    Method:
+    1. Download full price history
+    2. Find every swing high (local max) and swing low (local min)
+       using a 10-bar lookback window on each side
+    3. Cluster levels within 2% of each other — same zone = one level
+    4. Rank clusters by number of touches (more touches = stronger level)
+    5. Return the 3 strongest supports below price + 3 resistances above
+    """
+    try:
+        raw = yf.download(ticker, start=SR_START,
+                          end=datetime.today().strftime("%Y-%m-%d"),
+                          progress=False)
+        if raw.empty:
+            return {"support": [], "resistance": []}
+
+        highs  = raw["High"].squeeze()
+        lows   = raw["Low"].squeeze()
+        window = 10   # bars to look each side when detecting a swing
+
+        swing_highs, swing_lows = [], []
+
+        for i in range(window, len(raw) - window):
+            h = highs.iloc[i]
+            l = lows.iloc[i]
+            if h == highs.iloc[i - window: i + window + 1].max():
+                swing_highs.append(float(h))
+            if l == lows.iloc[i - window: i + window + 1].min():
+                swing_lows.append(float(l))
+
+        def cluster(levels: list, tolerance: float = 0.02) -> list:
+            """Group price levels within `tolerance` % of each other."""
+            if not levels:
+                return []
+            levels = sorted(levels)
+            clusters, group = [], [levels[0]]
+            for price in levels[1:]:
+                if (price - group[0]) / group[0] <= tolerance:
+                    group.append(price)
+                else:
+                    clusters.append({
+                        "price":   round(float(np.mean(group)), 2),
+                        "touches": len(group),
+                    })
+                    group = [price]
+            clusters.append({"price": round(float(np.mean(group)), 2), "touches": len(group)})
+            return clusters
+
+        resistances = cluster(swing_highs)
+        supports    = cluster(swing_lows)
+
+        # Keep only levels on the correct side of current price
+        resistances = [r for r in resistances if r["price"] > current_price]
+        supports    = [s for s in supports    if s["price"] < current_price]
+
+        # Sort by proximity to current price, then take top 3
+        resistances = sorted(resistances, key=lambda x: x["price"])[:3]
+        supports    = sorted(supports,    key=lambda x: x["price"], reverse=True)[:3]
+
+        # Add % distance from current price
+        for r in resistances:
+            r["pct_away"] = round((r["price"] - current_price) / current_price * 100, 2)
+        for s in supports:
+            s["pct_away"] = round((current_price - s["price"]) / current_price * 100, 2)
+
+        return {"support": supports, "resistance": resistances}
+
+    except Exception as e:
+        return {"support": [], "resistance": []}
 
 
 FEATURES = [
@@ -185,13 +268,18 @@ def predict_one(ticker: str) -> dict:
     sentiment_score, headlines = get_sentiment(ticker)
 
     # Latest indicator values
-    last = df.iloc[-1]
+    last          = df.iloc[-1]
+    current_price = round(float(last["Close"]), 2)
+
+    # Historical support & resistance (from 6+ years of swing data)
+    sr = get_support_resistance(ticker, current_price)
 
     return {
         "ticker":          ticker,
         "direction":       "UP" if pred == 1 else "DOWN",
         "confidence":      confidence,
         "model_accuracy":  obj["accuracy"],
+        "current_price":   current_price,
         "sentiment_score": sentiment_score,
         "sentiment_label": (
             "Positive" if sentiment_score > 0.05
@@ -207,6 +295,8 @@ def predict_one(ticker: str) -> dict:
             "bb_pos":      round(float(last["BB_pos"]), 3),
             "vol_ratio":   round(float(last["Vol_ratio"]), 2),
         },
+        "support":    sr["support"],
+        "resistance": sr["resistance"],
         "top_features": [
             {"name": n, "importance": round(float(v) * 100, 1)}
             for n, v in obj["importance"][:5]
@@ -385,6 +475,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .chart-wrap { position: relative; height: 160px; }
 
   .error-msg { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); border-radius: 10px; padding: 1rem; color: var(--down); font-size: 0.85rem; }
+
+  .sr-section { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+  .sr-title { font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 2px; }
+  .sr-subtitle { font-size: 0.68rem; color: var(--muted); margin-bottom: 0.4rem; }
+  .sr-price-label { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.6rem; }
+  .sr-group-label { font-size: 0.72rem; font-weight: 700; margin-bottom: 0.35rem; }
+  .resistance-label { color: var(--down); }
+  .support-label    { color: var(--up); }
+  .sr-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.3rem; font-size: 0.78rem; }
+  .sr-price  { font-weight: 700; width: 56px; }
+  .sr-pct    { color: var(--muted); width: 68px; }
+  .sr-touches { color: var(--muted); font-size: 0.7rem; width: 60px; }
+  .sr-bar-track { flex: 1; background: var(--border); border-radius: 3px; height: 4px; }
+  .sr-bar-fill  { height: 100%; border-radius: 3px; }
+  .resistance-fill { background: var(--down); }
+  .support-fill    { background: var(--up); }
+  .sr-empty { font-size: 0.75rem; color: var(--muted); font-style: italic; }
 </style>
 </head>
 <body>
@@ -515,6 +622,34 @@ function render(data) {
           <div class="sentiment-dot ${sc}"></div>
           <span style="color:var(--muted)">News Sentiment:</span>
           <span style="font-weight:600">${p.sentiment_label} (${p.sentiment_score})</span>
+        </div>
+
+        <div class="sr-section">
+          <div class="sr-title">Historical Support &amp; Resistance</div>
+          <div class="sr-subtitle">Based on ${p.as_of.slice(0,4) - 2018}+ years of swing highs/lows · touches = times tested</div>
+          <div class="sr-price-label">Current: <strong>$${p.current_price}</strong></div>
+
+          <div class="sr-group">
+            <div class="sr-group-label resistance-label">⬆ Resistance (price ceiling)</div>
+            ${p.resistance.length ? p.resistance.map(r => `
+              <div class="sr-row resistance-row">
+                <span class="sr-price">$${r.price}</span>
+                <span class="sr-pct">+${r.pct_away}% away</span>
+                <span class="sr-touches">${r.touches} touches</span>
+                <div class="sr-bar-track"><div class="sr-bar-fill resistance-fill" style="width:${Math.min(r.touches*10,100)}%"></div></div>
+              </div>`).join("") : '<div class="sr-empty">No resistance found above current price</div>'}
+          </div>
+
+          <div class="sr-group" style="margin-top:0.6rem">
+            <div class="sr-group-label support-label">⬇ Support (price floor)</div>
+            ${p.support.length ? p.support.map(s => `
+              <div class="sr-row support-row">
+                <span class="sr-price">$${s.price}</span>
+                <span class="sr-pct">-${s.pct_away}% away</span>
+                <span class="sr-touches">${s.touches} touches</span>
+                <div class="sr-bar-track"><div class="sr-bar-fill support-fill" style="width:${Math.min(s.touches*10,100)}%"></div></div>
+              </div>`).join("") : '<div class="sr-empty">No support found below current price</div>'}
+          </div>
         </div>
       </div>`;
 
