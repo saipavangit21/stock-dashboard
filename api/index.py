@@ -34,6 +34,21 @@ STOCKS     = ["AAPL", "MSFT", "TSLA", "NVDA", "^NSEI", "BDMD"]
 START_DATE = "2022-01-01"   # 2 years keeps training fast for serverless
 SR_START   = "2018-01-01"   # 6+ years of history for support/resistance
 
+# ── Market scan universes ───────────────────────────────────────────────────────
+US_UNIVERSE = [
+    "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "META", "AMD",
+    "JPM", "BAC", "GS", "MS", "V", "MA",
+    "XOM", "CVX", "PFE", "JNJ", "UNH",
+    "SPY", "QQQ", "ARKK", "BDMD",
+]
+INDIA_UNIVERSE = [
+    "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
+    "WIPRO.NS", "HCLTECH.NS", "AXISBANK.NS", "BAJFINANCE.NS", "SBIN.NS",
+    "MARUTI.NS", "TATAMOTORS.NS", "SUNPHARMA.NS", "DRREDDY.NS",
+    "ONGC.NS", "POWERGRID.NS", "NTPC.NS", "ADANIENT.NS", "LT.NS",
+    "TITAN.NS",
+]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DATA & FEATURES
@@ -190,6 +205,117 @@ def get_support_resistance(ticker: str, current_price: float) -> dict:
         return {"support": [], "resistance": []}
 
 
+def get_pcr(ticker: str) -> float:
+    """
+    Put/Call Ratio from nearest options expiry.
+    PCR > 1.2 → fear/oversold (contrarian BUY signal)
+    PCR < 0.7 → greed/overbought (contrarian SELL signal)
+    Returns None if options not available (e.g. Indian stocks).
+    """
+    try:
+        tk   = yf.Ticker(ticker)
+        exp  = tk.options
+        if not exp:
+            return None
+        chain = tk.option_chain(exp[0])
+        put_oi  = chain.puts["openInterest"].sum()
+        call_oi = chain.calls["openInterest"].sum()
+        if call_oi == 0:
+            return None
+        return round(float(put_oi / call_oi), 3)
+    except Exception:
+        return None
+
+
+def scan_ticker(ticker: str) -> dict | None:
+    """
+    Lightweight technical score for market scanning (no ML training).
+    Returns a dict with buy_score, sell_score, and key indicators.
+    """
+    try:
+        raw = yf.download(ticker, period="6mo", progress=False)
+        if raw.empty or len(raw) < 60:
+            return None
+
+        close  = raw["Close"].squeeze()
+        volume = raw["Volume"].squeeze()
+
+        # ── Indicators ──────────────────────────────────────────────
+        ret1  = float(close.pct_change().iloc[-1])
+        ret5  = float(close.pct_change(5).iloc[-1])
+
+        sma10 = close.rolling(10).mean().iloc[-1]
+        sma50 = close.rolling(50).mean().iloc[-1]
+        sma_ratio = float(sma10 / sma50)
+
+        delta = close.diff()
+        gain  = delta.where(delta > 0, 0).rolling(14).mean()
+        loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rsi   = float(100 - (100 / (1 + gain / loss)).iloc[-1])
+
+        ema12     = close.ewm(span=12).mean()
+        ema26     = close.ewm(span=26).mean()
+        macd      = ema12 - ema26
+        macd_hist = float((macd - macd.ewm(span=9).mean()).iloc[-1])
+
+        rm  = close.rolling(20).mean()
+        rs  = close.rolling(20).std()
+        bb_pos = float(((close - (rm - 2*rs)) / (4*rs)).iloc[-1])
+
+        vol_ratio = float((volume / volume.rolling(10).mean()).iloc[-1])
+        price     = round(float(close.iloc[-1]), 2)
+
+        pcr = get_pcr(ticker)
+
+        # ── Buy score ───────────────────────────────────────────────
+        buy = 0.0
+        if rsi < 30:   buy += 3.0
+        elif rsi < 40: buy += 1.5
+        elif rsi < 50: buy += 0.5
+        if macd_hist > 0:    buy += 1.5
+        if bb_pos < 0.2:     buy += 2.0
+        elif bb_pos < 0.4:   buy += 1.0
+        if sma_ratio > 1.0:  buy += 1.0
+        if vol_ratio > 2.0:  buy += 1.0
+        elif vol_ratio > 1.5: buy += 0.5
+        if ret5 < -0.05:     buy += 1.5   # dip
+        if pcr is not None:
+            if pcr > 1.3:    buy += 1.5
+            elif pcr > 1.0:  buy += 0.5
+
+        # ── Sell score ──────────────────────────────────────────────
+        sell = 0.0
+        if rsi > 70:   sell += 3.0
+        elif rsi > 60: sell += 1.5
+        elif rsi > 55: sell += 0.5
+        if macd_hist < 0:    sell += 1.5
+        if bb_pos > 0.8:     sell += 2.0
+        elif bb_pos > 0.6:   sell += 1.0
+        if sma_ratio < 1.0:  sell += 1.0
+        if vol_ratio > 2.0:  sell += 1.0
+        elif vol_ratio > 1.5: sell += 0.5
+        if ret5 > 0.08:      sell += 1.5  # extended
+        if pcr is not None:
+            if pcr < 0.6:    sell += 1.5
+            elif pcr < 0.8:  sell += 0.5
+
+        return {
+            "ticker":     ticker,
+            "price":      price,
+            "buy_score":  round(buy, 2),
+            "sell_score": round(sell, 2),
+            "rsi":        round(rsi, 1),
+            "macd_hist":  round(macd_hist, 4),
+            "bb_pos":     round(bb_pos, 3),
+            "sma_ratio":  round(sma_ratio, 4),
+            "vol_ratio":  round(vol_ratio, 2),
+            "ret5":       round(ret5 * 100, 2),
+            "pcr":        pcr,
+        }
+    except Exception:
+        return None
+
+
 FEATURES = [
     "Return_1d", "Return_5d", "Return_10d",
     "SMA_ratio", "Volatility",
@@ -324,6 +450,41 @@ def api_predict():
     return jsonify({
         "predictions": results,
         "errors":      errors,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    })
+
+
+@app.route("/api/scan")
+def api_scan():
+    """Scan US and India universes and return top buy/sell picks."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def scan_group(universe):
+        results = []
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futures = {ex.submit(scan_ticker, t): t for t in universe}
+            for f in as_completed(futures):
+                r = f.result()
+                if r:
+                    results.append(r)
+        return results
+
+    us_results     = scan_group(US_UNIVERSE)
+    india_results  = scan_group(INDIA_UNIVERSE)
+
+    def pick(results):
+        if not results:
+            return None, None
+        best_buy  = max(results, key=lambda x: x["buy_score"])
+        best_sell = max(results, key=lambda x: x["sell_score"])
+        return best_buy, best_sell
+
+    us_buy,    us_sell    = pick(us_results)
+    india_buy, india_sell = pick(india_results)
+
+    return jsonify({
+        "us":    {"buy": us_buy,    "sell": us_sell,    "scanned": len(us_results)},
+        "india": {"buy": india_buy, "sell": india_sell, "scanned": len(india_results)},
         "generated_at": datetime.utcnow().isoformat() + "Z",
     })
 
@@ -492,6 +653,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .resistance-fill { background: var(--down); }
   .support-fill    { background: var(--up); }
   .sr-empty { font-size: 0.75rem; color: var(--muted); font-style: italic; }
+
+  /* ── Market Scan ── */
+  #scan-section { margin-bottom: 2.5rem; }
+  .scan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1.2rem; margin-top: 1rem; }
+  .scan-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 1.4rem; }
+  .scan-card.buy-card  { border-top: 3px solid var(--up); }
+  .scan-card.sell-card { border-top: 3px solid var(--down); }
+  .scan-market-label { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 0.3rem; }
+  .scan-action { font-size: 1rem; font-weight: 800; margin-bottom: 0.6rem; }
+  .scan-action.buy  { color: var(--up); }
+  .scan-action.sell { color: var(--down); }
+  .scan-ticker { font-size: 1.6rem; font-weight: 800; margin-bottom: 0.2rem; }
+  .scan-price  { font-size: 0.85rem; color: var(--muted); margin-bottom: 0.8rem; }
+  .scan-score-row { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--muted); margin-bottom: 4px; }
+  .scan-reason { margin-top: 0.8rem; font-size: 0.78rem; color: var(--muted); line-height: 1.5; }
+  .scan-reason span { display: inline-block; background: var(--bg); border-radius: 4px; padding: 0.15rem 0.4rem; margin: 0.1rem 0.1rem 0.1rem 0; font-size: 0.72rem; }
+  .scan-reason span.bull { color: var(--up); }
+  .scan-reason span.bear { color: var(--down); }
+  #scan-loading { text-align:center; padding: 2rem; color: var(--muted); font-size: 0.9rem; display:none; }
 </style>
 </head>
 <body>
@@ -503,12 +683,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       AAPL · MSFT · TSLA · NVDA &nbsp;|&nbsp; ML + News Sentiment + Insider Signals
     </div>
   </div>
-  <button id="refresh-btn" onclick="loadPredictions()">↻ Refresh</button>
+  <div style="display:flex;gap:0.6rem">
+    <button id="scan-btn" onclick="runScan()" style="background:#0ea5e9;color:#fff;border:none;padding:0.5rem 1.2rem;border-radius:8px;cursor:pointer;font-size:0.9rem;font-weight:600;transition:opacity 0.2s;">⚡ Market Scan</button>
+    <button id="refresh-btn" onclick="loadPredictions()">↻ Refresh</button>
+  </div>
 </header>
 
 <div id="status-bar">Loading predictions…</div>
 
 <main>
+  <div id="scan-section" style="display:none">
+    <p class="section-title">⚡ Best Market Picks</p>
+    <div id="scan-loading"><div class="spinner"></div>Scanning 40+ stocks across US &amp; India markets…</div>
+    <div class="scan-grid" id="scan-cards"></div>
+  </div>
+
   <div id="loading">
     <div class="spinner"></div>
     Fetching live data and running models… this may take 20–40 seconds on first load.
@@ -710,6 +899,87 @@ function render(data) {
   });
 
   document.getElementById("content").style.display = "block";
+}
+
+async function runScan() {
+  const btn    = document.getElementById("scan-btn");
+  const sec    = document.getElementById("scan-section");
+  const cards  = document.getElementById("scan-cards");
+  const loader = document.getElementById("scan-loading");
+
+  btn.disabled = true;
+  btn.textContent = "Scanning…";
+  sec.style.display = "block";
+  loader.style.display = "block";
+  cards.innerHTML = "";
+
+  try {
+    const res  = await fetch("/api/scan");
+    const data = await res.json();
+    loader.style.display = "none";
+    renderScan(data);
+  } catch(e) {
+    loader.style.display = "none";
+    cards.innerHTML = `<div class="error-msg">Scan failed: ${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "⚡ Market Scan";
+  }
+}
+
+function scanReasons(s, action) {
+  const tags = [];
+  if (action === "buy") {
+    if (s.rsi < 35)        tags.push({t:`RSI ${s.rsi} (oversold)`, c:"bull"});
+    if (s.macd_hist > 0)   tags.push({t:`MACD bullish`, c:"bull"});
+    if (s.bb_pos < 0.3)    tags.push({t:`Near BB lower`, c:"bull"});
+    if (s.sma_ratio > 1)   tags.push({t:`SMA bullish`, c:"bull"});
+    if (s.vol_ratio > 1.5) tags.push({t:`Vol spike ${s.vol_ratio}x`, c:"bull"});
+    if (s.ret5 < -3)       tags.push({t:`-${Math.abs(s.ret5)}% dip in 5d`, c:"bull"});
+    if (s.pcr && s.pcr > 1.2) tags.push({t:`PCR ${s.pcr} (fear)`, c:"bull"});
+  } else {
+    if (s.rsi > 65)        tags.push({t:`RSI ${s.rsi} (overbought)`, c:"bear"});
+    if (s.macd_hist < 0)   tags.push({t:`MACD bearish`, c:"bear"});
+    if (s.bb_pos > 0.7)    tags.push({t:`Near BB upper`, c:"bear"});
+    if (s.sma_ratio < 1)   tags.push({t:`SMA bearish`, c:"bear"});
+    if (s.vol_ratio > 1.5) tags.push({t:`Vol spike ${s.vol_ratio}x`, c:"bear"});
+    if (s.ret5 > 5)        tags.push({t:`+${s.ret5}% run in 5d`, c:"bear"});
+    if (s.pcr && s.pcr < 0.7) tags.push({t:`PCR ${s.pcr} (greed)`, c:"bear"});
+  }
+  return tags.map(t => `<span class="${t.c}">${t.t}</span>`).join("");
+}
+
+function scanCard(market, action, s) {
+  if (!s) return `<div class="scan-card ${action}-card"><div class="scan-market-label">${market}</div><div class="scan-action ${action}">${action.toUpperCase()}</div><div style="color:var(--muted);font-size:0.85rem">No data available</div></div>`;
+  const score = action === "buy" ? s.buy_score : s.sell_score;
+  const maxScore = 12;
+  const pct = Math.min(score / maxScore * 100, 100).toFixed(0);
+  const arrow = action === "buy" ? "↑ BUY" : "↓ SELL";
+  return `
+    <div class="scan-card ${action}-card">
+      <div class="scan-market-label">${market} · Best ${action.toUpperCase()}</div>
+      <div class="scan-action ${action}">${arrow}</div>
+      <div class="scan-ticker">${s.ticker.replace(".NS","")}</div>
+      <div class="scan-price">Price: ${s.price} &nbsp;|&nbsp; 5d: ${s.ret5 > 0 ? "+" : ""}${s.ret5}%</div>
+      <div class="scan-score-row"><span>Signal Strength</span><span>${score} / ${maxScore}</span></div>
+      <div class="bar-track"><div class="bar-fill ${action === "buy" ? "up" : "down"}" style="width:${pct}%"></div></div>
+      <div class="scan-reason">${scanReasons(s, action) || "<span>Multiple signals aligned</span>"}</div>
+      ${s.pcr ? `<div style="font-size:0.72rem;color:var(--muted);margin-top:0.5rem">Put/Call Ratio: ${s.pcr}</div>` : ""}
+    </div>`;
+}
+
+function renderScan(data) {
+  const cards = document.getElementById("scan-cards");
+  cards.innerHTML =
+    scanCard("🇺🇸 US",    "buy",  data.us.buy)    +
+    scanCard("🇺🇸 US",    "sell", data.us.sell)   +
+    scanCard("🇮🇳 India", "buy",  data.india.buy)  +
+    scanCard("🇮🇳 India", "sell", data.india.sell);
+
+  const meta = document.createElement("div");
+  meta.style.cssText = "font-size:0.72rem;color:var(--muted);margin-top:0.8rem;text-align:center;grid-column:1/-1";
+  meta.textContent = `Scanned ${data.us.scanned} US + ${data.india.scanned} India stocks · ${new Date(data.generated_at).toLocaleTimeString()}`;
+  document.getElementById("scan-cards").appendChild(meta);
 }
 
 // Load on page open
