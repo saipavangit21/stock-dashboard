@@ -189,6 +189,10 @@ def get_support_resistance(ticker: str, current_price: float) -> dict:
         resistances = [r for r in resistances if r["price"] > current_price]
         supports    = [s for s in supports    if s["price"] < current_price]
 
+        # Only keep levels within 15% of current price, then take top 3
+        resistances = [r for r in resistances if r["price"] / current_price - 1 <= 0.15]
+        supports    = [s for s in supports    if 1 - s["price"] / current_price <= 0.15]
+
         # Sort by proximity to current price, then take top 3
         resistances = sorted(resistances, key=lambda x: x["price"])[:3]
         supports    = sorted(supports,    key=lambda x: x["price"], reverse=True)[:3]
@@ -476,11 +480,26 @@ def api_scan():
     us_results     = scan_group(US_UNIVERSE)
     india_results  = scan_group(INDIA_UNIVERSE)
 
+    MIN_BUY_SCORE  = 4.0
+    MIN_SELL_SCORE = 4.0
+
     def pick(results):
         if not results:
             return None, None
-        best_buy  = max(results, key=lambda x: x["buy_score"])
-        best_sell = max(results, key=lambda x: x["sell_score"])
+        by_buy  = sorted(results, key=lambda x: x["buy_score"],  reverse=True)
+        by_sell = sorted(results, key=lambda x: x["sell_score"], reverse=True)
+
+        best_buy  = by_buy[0]  if by_buy[0]["buy_score"]   >= MIN_BUY_SCORE  else None
+        best_sell = by_sell[0] if by_sell[0]["sell_score"] >= MIN_SELL_SCORE else None
+
+        # Avoid showing the same ticker as both buy and sell
+        if best_buy and best_sell and best_buy["ticker"] == best_sell["ticker"]:
+            # Try the next candidate for the weaker signal
+            if best_buy["buy_score"] >= best_sell["sell_score"]:
+                best_sell = next((r for r in by_sell[1:] if r["sell_score"] >= MIN_SELL_SCORE), None)
+            else:
+                best_buy  = next((r for r in by_buy[1:]  if r["buy_score"]  >= MIN_BUY_SCORE),  None)
+
         return best_buy, best_sell
 
     us_buy,    us_sell    = pick(us_results)
@@ -1102,7 +1121,7 @@ function srRows(levels, type) {
 }
 
 function scanCard(market, action, s) {
-  if (!s) return `<div class="scan-card ${action}-card"><div class="scan-market-label">${market}</div><div class="scan-action ${action}">${action.toUpperCase()}</div><div style="color:var(--muted);font-size:0.85rem">No data available</div></div>`;
+  if (!s) return `<div class="scan-card ${action}-card"><div class="scan-market-label">${market} · Best ${action.toUpperCase()}</div><div class="scan-action ${action}">${action === "buy" ? "↑ BUY" : "↓ SELL"}</div><div style="color:var(--muted);font-size:0.85rem;margin-top:0.5rem">No strong ${action} signal right now<br><span style="font-size:0.72rem">Score below threshold (4.0 / 12) — market may be ranging</span></div></div>`;
   const score = action === "buy" ? s.buy_score : s.sell_score;
   const maxScore = 12;
   const pct = Math.min(score / maxScore * 100, 100).toFixed(0);
