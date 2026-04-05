@@ -299,6 +299,8 @@ def scan_ticker(ticker: str) -> dict | None:
             if pcr < 0.6:    sell += 1.5
             elif pcr < 0.8:  sell += 0.5
 
+        sr = get_support_resistance(ticker, price)
+
         return {
             "ticker":     ticker,
             "price":      price,
@@ -311,6 +313,8 @@ def scan_ticker(ticker: str) -> dict | None:
             "vol_ratio":  round(vol_ratio, 2),
             "ret5":       round(ret5 * 100, 2),
             "pcr":        pcr,
+            "support":    sr["support"],
+            "resistance": sr["resistance"],
         }
     except Exception:
         return None
@@ -1086,6 +1090,17 @@ function scanReasons(s, action) {
   return tags.map(t => `<span class="${t.c}">${t.t}</span>`).join("");
 }
 
+function srRows(levels, type) {
+  if (!levels || !levels.length) return `<div class="sr-empty">None found</div>`;
+  return levels.map(l => `
+    <div class="sr-row">
+      <span class="sr-price">${l.price}</span>
+      <span class="sr-pct">${type === "resistance" ? "+" : "-"}${l.pct_away}% away</span>
+      <span class="sr-touches">${l.touches} touches</span>
+      <div class="sr-bar-track"><div class="sr-bar-fill ${type === "resistance" ? "resistance-fill" : "support-fill"}" style="width:${Math.min(l.touches*10,100)}%"></div></div>
+    </div>`).join("");
+}
+
 function scanCard(market, action, s) {
   if (!s) return `<div class="scan-card ${action}-card"><div class="scan-market-label">${market}</div><div class="scan-action ${action}">${action.toUpperCase()}</div><div style="color:var(--muted);font-size:0.85rem">No data available</div></div>`;
   const score = action === "buy" ? s.buy_score : s.sell_score;
@@ -1097,11 +1112,18 @@ function scanCard(market, action, s) {
       <div class="scan-market-label">${market} · Best ${action.toUpperCase()}</div>
       <div class="scan-action ${action}">${arrow}</div>
       <div class="scan-ticker">${s.ticker.replace(".NS","")}</div>
-      <div class="scan-price">Price: ${s.price} &nbsp;|&nbsp; 5d: ${s.ret5 > 0 ? "+" : ""}${s.ret5}%</div>
+      <div class="scan-price">Current Price: <strong>${s.price}</strong> &nbsp;|&nbsp; 5d: ${s.ret5 > 0 ? "+" : ""}${s.ret5}%</div>
       <div class="scan-score-row"><span>Signal Strength</span><span>${score} / ${maxScore}</span></div>
       <div class="bar-track"><div class="bar-fill ${action === "buy" ? "up" : "down"}" style="width:${pct}%"></div></div>
       <div class="scan-reason">${scanReasons(s, action) || "<span>Multiple signals aligned</span>"}</div>
       ${s.pcr ? `<div style="font-size:0.72rem;color:var(--muted);margin-top:0.5rem">Put/Call Ratio: ${s.pcr}</div>` : ""}
+
+      <div class="sr-section">
+        <div class="sr-group-label resistance-label" style="font-size:0.72rem;margin-bottom:0.35rem">⬆ Resistance — where to take profit / stop if shorting</div>
+        ${srRows(s.resistance, "resistance")}
+        <div class="sr-group-label support-label" style="font-size:0.72rem;margin-top:0.6rem;margin-bottom:0.35rem">⬇ Support — where to set stop-loss / entry on dip</div>
+        ${srRows(s.support, "support")}
+      </div>
     </div>`;
 }
 
