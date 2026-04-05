@@ -131,32 +131,17 @@ def get_sentiment(ticker: str) -> tuple[float, list]:
         return 0.0, []
 
 
-def get_support_resistance(ticker: str, current_price: float) -> dict:
+def compute_support_resistance(highs, lows, current_price: float) -> dict:
     """
-    Find historical support & resistance levels from 6+ years of price data.
-
-    Method:
-    1. Download full price history
-    2. Find every swing high (local max) and swing low (local min)
-       using a 10-bar lookback window on each side
-    3. Cluster levels within 2% of each other — same zone = one level
-    4. Rank clusters by number of touches (more touches = stronger level)
-    5. Return the 3 strongest supports below price + 3 resistances above
+    Core S/R computation from pre-downloaded High/Low series.
+    Extracted so scan_ticker can reuse its already-downloaded data.
     """
     try:
-        raw = yf.download(ticker, start=SR_START,
-                          end=datetime.today().strftime("%Y-%m-%d"),
-                          progress=False)
-        if raw.empty:
-            return {"support": [], "resistance": []}
-
-        highs  = raw["High"].squeeze()
-        lows   = raw["Low"].squeeze()
         window = 10   # bars to look each side when detecting a swing
 
         swing_highs, swing_lows = [], []
 
-        for i in range(window, len(raw) - window):
+        for i in range(window, len(highs) - window):
             h = highs.iloc[i]
             l = lows.iloc[i]
             if h == highs.iloc[i - window: i + window + 1].max():
@@ -206,6 +191,21 @@ def get_support_resistance(ticker: str, current_price: float) -> dict:
         return {"support": supports, "resistance": resistances}
 
     except Exception as e:
+        return {"support": [], "resistance": []}
+
+
+def get_support_resistance(ticker: str, current_price: float) -> dict:
+    """Download full price history and compute S/R levels."""
+    try:
+        raw = yf.download(ticker, start=SR_START,
+                          end=datetime.today().strftime("%Y-%m-%d"),
+                          progress=False)
+        if raw.empty:
+            return {"support": [], "resistance": []}
+        return compute_support_resistance(
+            raw["High"].squeeze(), raw["Low"].squeeze(), current_price
+        )
+    except Exception:
         return {"support": [], "resistance": []}
 
 
@@ -313,7 +313,10 @@ def scan_ticker(ticker: str) -> dict | None:
         except Exception:
             pass
 
-        sr = get_support_resistance(ticker, price)
+        # Reuse already-downloaded data — avoids a second yfinance call per ticker
+        sr = compute_support_resistance(
+            raw["High"].squeeze(), raw["Low"].squeeze(), price
+        )
 
         return {
             "ticker":     ticker,
