@@ -237,7 +237,7 @@ def scan_ticker(ticker: str) -> dict | None:
     Returns a dict with buy_score, sell_score, and key indicators.
     """
     try:
-        raw = yf.download(ticker, period="6mo", progress=False)
+        raw = yf.download(ticker, period="3y", progress=False)
         if raw.empty or len(raw) < 60:
             return None
 
