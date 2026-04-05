@@ -654,6 +654,46 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .support-fill    { background: var(--up); }
   .sr-empty { font-size: 0.75rem; color: var(--muted); font-style: italic; }
 
+  /* ── Signal Guide ── */
+  #guide-section { margin-bottom: 2rem; }
+  .guide-toggle {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.75rem 1.2rem;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text);
+    width: 100%;
+    text-align: left;
+  }
+  .guide-toggle:hover { border-color: var(--accent); }
+  .guide-toggle .chevron { transition: transform 0.2s; font-style: normal; }
+  .guide-toggle.open .chevron { transform: rotate(180deg); }
+  .guide-body {
+    display: none;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 10px 10px;
+    padding: 1.4rem;
+  }
+  .guide-body.open { display: block; }
+  .guide-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.4rem; }
+  .guide-group h4 { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--accent); margin-bottom: 0.7rem; }
+  .guide-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem; padding: 0.4rem 0; border-bottom: 1px solid var(--border); font-size: 0.8rem; }
+  .guide-row:last-child { border-bottom: none; }
+  .guide-signal { font-weight: 600; color: var(--text); min-width: 130px; }
+  .guide-desc { color: var(--muted); line-height: 1.4; }
+  .guide-pts { font-weight: 700; white-space: nowrap; }
+  .guide-pts.bull { color: var(--up); }
+  .guide-pts.bear { color: var(--down); }
+  .guide-note { font-size: 0.75rem; color: var(--muted); margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid var(--border); line-height: 1.6; }
+
   /* ── Market Scan ── */
   #scan-section { margin-bottom: 2.5rem; }
   .scan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1.2rem; margin-top: 1rem; }
@@ -692,6 +732,98 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div id="status-bar">Loading predictions…</div>
 
 <main>
+  <div id="guide-section">
+    <button class="guide-toggle" onclick="toggleGuide(this)">
+      <span>📖 Signal &amp; Indicator Guide — what does each number mean?</span>
+      <i class="chevron">▼</i>
+    </button>
+    <div class="guide-body">
+      <div class="guide-cols">
+
+        <div class="guide-group">
+          <h4>Technical Indicators</h4>
+          <div class="guide-row">
+            <span class="guide-signal">RSI (14)</span>
+            <span class="guide-desc">Relative Strength Index. Measures if a stock is overbought or oversold over 14 days.</span>
+          </div>
+          <div class="guide-row" style="padding-left:1rem">
+            <span class="guide-signal" style="color:var(--up)">RSI &lt; 30</span>
+            <span class="guide-desc">Oversold — potential bounce / buy zone</span>
+          </div>
+          <div class="guide-row" style="padding-left:1rem">
+            <span class="guide-signal" style="color:var(--down)">RSI &gt; 70</span>
+            <span class="guide-desc">Overbought — potential pullback / sell zone</span>
+          </div>
+          <div class="guide-row">
+            <span class="guide-signal">MACD Histogram</span>
+            <span class="guide-desc">Difference between fast &amp; slow momentum. Positive = bullish momentum building. Negative = bearish.</span>
+          </div>
+          <div class="guide-row">
+            <span class="guide-signal">SMA Ratio</span>
+            <span class="guide-desc">10-day avg ÷ 50-day avg. &gt;1 = short-term trend above long-term (Bullish). &lt;1 = Bearish.</span>
+          </div>
+          <div class="guide-row">
+            <span class="guide-signal">BB Position</span>
+            <span class="guide-desc">Where price sits inside Bollinger Bands. 0 = at lower band (oversold). 1 = at upper band (overbought). 0.5 = middle.</span>
+          </div>
+          <div class="guide-row">
+            <span class="guide-signal">Vol Ratio</span>
+            <span class="guide-desc">Today's volume ÷ 10-day average. 2x = twice normal trading activity — confirms momentum.</span>
+          </div>
+          <div class="guide-row">
+            <span class="guide-signal">Volatility</span>
+            <span class="guide-desc">10-day std dev of daily returns. Higher = bigger price swings, higher risk.</span>
+          </div>
+          <div class="guide-row">
+            <span class="guide-signal">Return 1d / 5d</span>
+            <span class="guide-desc">Price change over last 1 or 5 trading days as a %. Not importance — actual move.</span>
+          </div>
+          <div class="guide-row">
+            <span class="guide-signal">Put/Call Ratio</span>
+            <span class="guide-desc">Options market sentiment. &gt;1.2 = more puts (fear) = contrarian buy. &lt;0.7 = more calls (greed) = contrarian sell.</span>
+          </div>
+        </div>
+
+        <div class="guide-group">
+          <h4>Buy Signal Scoring (max 12 pts)</h4>
+          <div class="guide-row"><span class="guide-signal">RSI &lt; 30</span><span class="guide-desc">Heavily oversold</span><span class="guide-pts bull">+3.0</span></div>
+          <div class="guide-row"><span class="guide-signal">RSI 30–40</span><span class="guide-desc">Moderately oversold</span><span class="guide-pts bull">+1.5</span></div>
+          <div class="guide-row"><span class="guide-signal">RSI 40–50</span><span class="guide-desc">Mildly oversold</span><span class="guide-pts bull">+0.5</span></div>
+          <div class="guide-row"><span class="guide-signal">MACD &gt; 0</span><span class="guide-desc">Bullish momentum</span><span class="guide-pts bull">+1.5</span></div>
+          <div class="guide-row"><span class="guide-signal">BB Pos &lt; 0.2</span><span class="guide-desc">Near lower band (dip zone)</span><span class="guide-pts bull">+2.0</span></div>
+          <div class="guide-row"><span class="guide-signal">BB Pos 0.2–0.4</span><span class="guide-desc">Below midband</span><span class="guide-pts bull">+1.0</span></div>
+          <div class="guide-row"><span class="guide-signal">SMA Ratio &gt; 1</span><span class="guide-desc">Short-term trend bullish</span><span class="guide-pts bull">+1.0</span></div>
+          <div class="guide-row"><span class="guide-signal">Vol &gt; 2x</span><span class="guide-desc">Volume confirms move</span><span class="guide-pts bull">+1.0</span></div>
+          <div class="guide-row"><span class="guide-signal">5d Return &lt; -5%</span><span class="guide-desc">Sharp dip — bounce candidate</span><span class="guide-pts bull">+1.5</span></div>
+          <div class="guide-row"><span class="guide-signal">PCR &gt; 1.3</span><span class="guide-desc">Extreme fear in options</span><span class="guide-pts bull">+1.5</span></div>
+        </div>
+
+        <div class="guide-group">
+          <h4>Sell Signal Scoring (max 12 pts)</h4>
+          <div class="guide-row"><span class="guide-signal">RSI &gt; 70</span><span class="guide-desc">Heavily overbought</span><span class="guide-pts bear">+3.0</span></div>
+          <div class="guide-row"><span class="guide-signal">RSI 60–70</span><span class="guide-desc">Moderately overbought</span><span class="guide-pts bear">+1.5</span></div>
+          <div class="guide-row"><span class="guide-signal">RSI 55–60</span><span class="guide-desc">Mildly overbought</span><span class="guide-pts bear">+0.5</span></div>
+          <div class="guide-row"><span class="guide-signal">MACD &lt; 0</span><span class="guide-desc">Bearish momentum</span><span class="guide-pts bear">+1.5</span></div>
+          <div class="guide-row"><span class="guide-signal">BB Pos &gt; 0.8</span><span class="guide-desc">Near upper band (extended)</span><span class="guide-pts bear">+2.0</span></div>
+          <div class="guide-row"><span class="guide-signal">BB Pos 0.6–0.8</span><span class="guide-desc">Above midband</span><span class="guide-pts bear">+1.0</span></div>
+          <div class="guide-row"><span class="guide-signal">SMA Ratio &lt; 1</span><span class="guide-desc">Short-term trend bearish</span><span class="guide-pts bear">+1.0</span></div>
+          <div class="guide-row"><span class="guide-signal">Vol &gt; 2x</span><span class="guide-desc">Volume confirms move</span><span class="guide-pts bear">+1.0</span></div>
+          <div class="guide-row"><span class="guide-signal">5d Return &gt; +8%</span><span class="guide-desc">Extended run — pullback risk</span><span class="guide-pts bear">+1.5</span></div>
+          <div class="guide-row"><span class="guide-signal">PCR &lt; 0.6</span><span class="guide-desc">Extreme greed in options</span><span class="guide-pts bear">+1.5</span></div>
+
+          <h4 style="margin-top:1.2rem">Feature Importance Chart</h4>
+          <div class="guide-row"><span class="guide-signal">Bar width %</span><span class="guide-desc">How much the ML model relies on that indicator when predicting UP or DOWN. Not the actual value of the indicator.</span></div>
+          <div class="guide-row"><span class="guide-signal">Model Confidence</span><span class="guide-desc">How certain the RandomForest model is about tomorrow's direction. Based on vote share across 50 decision trees.</span></div>
+          <div class="guide-row"><span class="guide-signal">Backtest Accuracy</span><span class="guide-desc">How often the model was correct on historical test data (last 20% of price history).</span></div>
+        </div>
+
+      </div>
+      <div class="guide-note">
+        ⚠️ <strong>Disclaimer:</strong> This dashboard is for educational and research purposes only. Signals are generated from technical indicators and ML models — they do not constitute financial advice. Past performance does not guarantee future results. Always do your own research before making investment decisions.
+      </div>
+    </div>
+  </div>
+
   <div id="scan-section" style="display:none">
     <p class="section-title">⚡ Best Market Picks</p>
     <div id="scan-loading"><div class="spinner"></div>Scanning 40+ stocks across US &amp; India markets…</div>
@@ -899,6 +1031,11 @@ function render(data) {
   });
 
   document.getElementById("content").style.display = "block";
+}
+
+function toggleGuide(btn) {
+  btn.classList.toggle("open");
+  btn.nextElementSibling.classList.toggle("open");
 }
 
 async function runScan() {
