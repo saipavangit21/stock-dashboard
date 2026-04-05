@@ -189,11 +189,11 @@ def get_support_resistance(ticker: str, current_price: float) -> dict:
         resistances = [r for r in resistances if r["price"] > current_price]
         supports    = [s for s in supports    if s["price"] < current_price]
 
-        # Only keep levels within 15% of current price, then take top 3
-        resistances = [r for r in resistances if r["price"] / current_price - 1 <= 0.15]
-        supports    = [s for s in supports    if 1 - s["price"] / current_price <= 0.15]
+        # Sort by proximity first, then take top 3 regardless of distance
+        # (filter extreme outliers beyond 40% — those are from a different price era)
+        resistances = [r for r in resistances if r["price"] / current_price - 1 <= 0.40]
+        supports    = [s for s in supports    if 1 - s["price"] / current_price <= 0.40]
 
-        # Sort by proximity to current price, then take top 3
         resistances = sorted(resistances, key=lambda x: x["price"])[:3]
         supports    = sorted(supports,    key=lambda x: x["price"], reverse=True)[:3]
 
@@ -302,6 +302,16 @@ def scan_ticker(ticker: str) -> dict | None:
         if pcr is not None:
             if pcr < 0.6:    sell += 1.5
             elif pcr < 0.8:  sell += 0.5
+
+        # Sanity check: reject clearly bad price data
+        # Compare against a fresh quote to catch yfinance multi-level column bugs
+        try:
+            live = yf.Ticker(ticker).fast_info
+            live_price = float(live.last_price)
+            if live_price > 0 and abs(price - live_price) / live_price > 0.20:
+                price = round(live_price, 2)
+        except Exception:
+            pass
 
         sr = get_support_resistance(ticker, price)
 
@@ -1110,14 +1120,19 @@ function scanReasons(s, action) {
 }
 
 function srRows(levels, type) {
-  if (!levels || !levels.length) return `<div class="sr-empty">None found</div>`;
-  return levels.map(l => `
-    <div class="sr-row">
+  if (!levels || !levels.length) return `<div class="sr-empty">No historical levels found nearby</div>`;
+  return levels.map(l => {
+    const far  = l.pct_away > 10;
+    const note = far ? ` <span style="color:var(--neutral);font-size:0.68rem">(far)</span>` : "";
+    const col  = far ? "color:var(--muted)" : "";
+    return `
+    <div class="sr-row" style="${col}">
       <span class="sr-price">${l.price}</span>
-      <span class="sr-pct">${type === "resistance" ? "+" : "-"}${l.pct_away}% away</span>
+      <span class="sr-pct">${type === "resistance" ? "+" : "-"}${l.pct_away}%${note}</span>
       <span class="sr-touches">${l.touches} touches</span>
       <div class="sr-bar-track"><div class="sr-bar-fill ${type === "resistance" ? "resistance-fill" : "support-fill"}" style="width:${Math.min(l.touches*10,100)}%"></div></div>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 }
 
 function scanCard(market, action, s) {
