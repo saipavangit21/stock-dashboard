@@ -30,7 +30,7 @@ app = Flask(__name__)
 _cache = {}
 _lock  = threading.Lock()
 
-STOCKS     = ["AAPL", "MSFT", "TSLA", "NVDA"]
+STOCKS     = ["AAPL", "MSFT", "TSLA", "NVDA", "^NSEI", "BDMD"]
 START_DATE = "2022-01-01"   # 2 years keeps training fast for serverless
 SR_START   = "2018-01-01"   # 6+ years of history for support/resistance
 
