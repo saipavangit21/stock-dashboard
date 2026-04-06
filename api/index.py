@@ -197,13 +197,11 @@ def compute_support_resistance(highs, lows, current_price: float) -> dict:
 def get_support_resistance(ticker: str, current_price: float) -> dict:
     """Download full price history and compute S/R levels."""
     try:
-        raw = yf.download(ticker, start=SR_START,
-                          end=datetime.today().strftime("%Y-%m-%d"),
-                          progress=False)
+        raw = yf.Ticker(ticker).history(period="max")
         if raw.empty:
             return {"support": [], "resistance": []}
         return compute_support_resistance(
-            raw["High"].squeeze(), raw["Low"].squeeze(), current_price
+            raw["High"], raw["Low"], current_price
         )
     except Exception:
         return {"support": [], "resistance": []}
@@ -237,12 +235,19 @@ def scan_ticker(ticker: str) -> dict | None:
     Returns a dict with buy_score, sell_score, and key indicators.
     """
     try:
-        raw = yf.download(ticker, period="3y", progress=False)
+        raw = yf.Ticker(ticker).history(period="3y")
         if raw.empty or len(raw) < 60:
             return None
 
-        close  = raw["Close"].squeeze()
-        volume = raw["Volume"].squeeze()
+        close  = raw["Close"]
+        volume = raw["Volume"]
+
+        # Sanity check: latest close must be within 3x / 0.33x of its own 60-day median
+        # Catches yfinance returning unadjusted/wrong price series
+        median60 = float(close.iloc[-60:].median())
+        latest   = float(close.iloc[-1])
+        if median60 > 0 and not (median60 * 0.33 < latest < median60 * 3.0):
+            return None   # data is clearly corrupted, skip this ticker
 
         # ── Indicators ──────────────────────────────────────────────
         ret1  = float(close.pct_change().iloc[-1])
@@ -302,16 +307,6 @@ def scan_ticker(ticker: str) -> dict | None:
         if pcr is not None:
             if pcr < 0.6:    sell += 1.5
             elif pcr < 0.8:  sell += 0.5
-
-        # Sanity check: reject clearly bad price data
-        # Compare against a fresh quote to catch yfinance multi-level column bugs
-        try:
-            live = yf.Ticker(ticker).fast_info
-            live_price = float(live.last_price)
-            if live_price > 0 and abs(price - live_price) / live_price > 0.20:
-                price = round(live_price, 2)
-        except Exception:
-            pass
 
         # Reuse already-downloaded data — avoids a second yfinance call per ticker
         sr = compute_support_resistance(
