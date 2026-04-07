@@ -41,6 +41,12 @@ US_UNIVERSE = [
     "XOM", "CVX", "PFE", "JNJ", "UNH",
     "SPY", "QQQ", "ARKK", "BDMD",
 ]
+PENNY_UNIVERSE = [
+    "SNDL", "CLOV", "ABAT", "IMPP", "ZENA", "PHUN",
+    "NAKD", "EXPR", "BBBY", "AMC", "GME", "WISH",
+    "NKLA", "WKHS", "RIDE", "GOEV", "XELA", "GFAI",
+    "BNGO", "SNGX", "OBSV", "CRBP", "ADMA", "AEYE",
+]
 INDIA_UNIVERSE = [
     "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
     "WIPRO.NS", "HCLTECH.NS", "AXISBANK.NS", "BAJFINANCE.NS", "SBIN.NS",
@@ -520,6 +526,31 @@ def api_scan():
     })
 
 
+@app.route("/api/penny")
+def api_penny():
+    """Scan penny stock universe and return ranked buy/sell picks."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    results = []
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = {ex.submit(scan_ticker, t): t for t in PENNY_UNIVERSE}
+        for f in as_completed(futures):
+            r = f.result()
+            if r and r["price"] <= 10:   # enforce penny stock price cap
+                results.append(r)
+
+    # Rank top 3 buys and top 3 sells
+    top_buys  = sorted([r for r in results if r["buy_score"]  >= 3.0], key=lambda x: x["buy_score"],  reverse=True)[:3]
+    top_sells = sorted([r for r in results if r["sell_score"] >= 3.0], key=lambda x: x["sell_score"], reverse=True)[:3]
+
+    return jsonify({
+        "buys":         top_buys,
+        "sells":        top_sells,
+        "scanned":      len(results),
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    })
+
+
 @app.route("/")
 def dashboard():
     return render_template_string(HTML_TEMPLATE, stocks=STOCKS)
@@ -755,6 +786,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
   <div style="display:flex;gap:0.6rem">
+    <button id="penny-btn" onclick="runPennyScan()" style="background:#f59e0b;color:#000;border:none;padding:0.5rem 1.2rem;border-radius:8px;cursor:pointer;font-size:0.9rem;font-weight:600;transition:opacity 0.2s;">💰 Penny Scan</button>
     <button id="scan-btn" onclick="runScan()" style="background:#0ea5e9;color:#fff;border:none;padding:0.5rem 1.2rem;border-radius:8px;cursor:pointer;font-size:0.9rem;font-weight:600;transition:opacity 0.2s;">⚡ Market Scan</button>
     <button id="refresh-btn" onclick="loadPredictions()">↻ Refresh</button>
   </div>
@@ -859,6 +891,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <p class="section-title">⚡ Best Market Picks</p>
     <div id="scan-loading"><div class="spinner"></div>Scanning 40+ stocks across US &amp; India markets…</div>
     <div class="scan-grid" id="scan-cards"></div>
+  </div>
+
+  <div id="penny-section" style="display:none">
+    <p class="section-title">💰 Penny Stock Picks <span style="font-size:0.72rem;color:var(--muted);font-weight:400">(US stocks ≤$10 · high risk, high reward)</span></p>
+    <div id="penny-loading" style="display:none;text-align:center;padding:1.5rem;color:var(--muted);font-size:0.9rem"><div class="spinner"></div>Scanning penny stocks…</div>
+    <div id="penny-buy-wrap">
+      <p style="font-size:0.8rem;font-weight:700;color:var(--up);margin-bottom:0.6rem">↑ TOP BUY SETUPS</p>
+      <div class="scan-grid" id="penny-buys"></div>
+    </div>
+    <div id="penny-sell-wrap" style="margin-top:1.2rem">
+      <p style="font-size:0.8rem;font-weight:700;color:var(--down);margin-bottom:0.6rem">↓ TOP SELL / AVOID</p>
+      <div class="scan-grid" id="penny-sells"></div>
+    </div>
+    <div style="font-size:0.72rem;color:var(--muted);margin-top:0.8rem;padding:0.6rem;background:rgba(239,68,68,0.08);border-radius:8px;border:1px solid rgba(239,68,68,0.2)">
+      ⚠️ Penny stocks are extremely volatile and speculative. Low volume means prices can move dramatically on small orders. Never risk more than you can afford to lose entirely.
+    </div>
   </div>
 
   <div id="loading">
@@ -1062,6 +1110,72 @@ function render(data) {
   });
 
   document.getElementById("content").style.display = "block";
+}
+
+async function runPennyScan() {
+  const btn    = document.getElementById("penny-btn");
+  const sec    = document.getElementById("penny-section");
+  const loader = document.getElementById("penny-loading");
+
+  btn.disabled = true;
+  btn.textContent = "Scanning…";
+  sec.style.display = "block";
+  loader.style.display = "block";
+  document.getElementById("penny-buys").innerHTML  = "";
+  document.getElementById("penny-sells").innerHTML = "";
+
+  try {
+    const res  = await fetch("/api/penny");
+    const data = await res.json();
+    loader.style.display = "none";
+    renderPenny(data);
+  } catch(e) {
+    loader.style.display = "none";
+    document.getElementById("penny-buys").innerHTML = `<div class="error-msg">Scan failed: ${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "💰 Penny Scan";
+  }
+}
+
+function renderPenny(data) {
+  const buysEl  = document.getElementById("penny-buys");
+  const sellsEl = document.getElementById("penny-sells");
+
+  if (!data.buys.length)  buysEl.innerHTML  = `<div class="scan-card" style="color:var(--muted);font-size:0.85rem;padding:1rem">No strong buy setups found right now</div>`;
+  if (!data.sells.length) sellsEl.innerHTML = `<div class="scan-card" style="color:var(--muted);font-size:0.85rem;padding:1rem">No strong sell setups found right now</div>`;
+
+  data.buys.forEach(s  => buysEl.innerHTML  += pennyCard(s, "buy"));
+  data.sells.forEach(s => sellsEl.innerHTML += pennyCard(s, "sell"));
+
+  const meta = document.createElement("div");
+  meta.style.cssText = "font-size:0.72rem;color:var(--muted);margin-top:0.5rem";
+  meta.textContent = `Scanned ${data.scanned} penny stocks · ${new Date(data.generated_at).toLocaleTimeString()}`;
+  document.getElementById("penny-sell-wrap").appendChild(meta);
+}
+
+function pennyCard(s, action) {
+  const score   = action === "buy" ? s.buy_score : s.sell_score;
+  const maxScore = 12;
+  const pct     = Math.min(score / maxScore * 100, 100).toFixed(0);
+  const volWarn = s.vol_ratio < 0.5 ? `<span style="color:var(--neutral);font-size:0.7rem">⚠️ Low volume (${s.vol_ratio}x avg) — low liquidity</span>` : "";
+  return `
+    <div class="scan-card ${action}-card">
+      <div class="scan-market-label">🇺🇸 US Penny · ${action === "buy" ? "↑ BUY Setup" : "↓ SELL / Avoid"}</div>
+      <div class="scan-action ${action}">${action === "buy" ? "↑" : "↓"} ${s.ticker}</div>
+      <div class="scan-price">Price: <strong>$${s.price}</strong> &nbsp;|&nbsp; 5d: ${s.ret5 > 0 ? "+" : ""}${s.ret5}%</div>
+      <div class="scan-score-row"><span>Signal Strength</span><span>${score} / ${maxScore}</span></div>
+      <div class="bar-track"><div class="bar-fill ${action === "buy" ? "up" : "down"}" style="width:${pct}%"></div></div>
+      <div class="scan-reason" style="margin-top:0.5rem">${scanReasons(s, action) || "<span>Multiple signals aligned</span>"}</div>
+      ${volWarn}
+      ${s.pcr ? `<div style="font-size:0.72rem;color:var(--muted);margin-top:0.4rem">Put/Call Ratio: ${s.pcr}</div>` : ""}
+      <div class="sr-section" style="margin-top:0.8rem">
+        <div class="sr-group-label resistance-label" style="font-size:0.72rem;margin-bottom:0.3rem">⬆ Resistance</div>
+        ${srRows(s.resistance, "resistance")}
+        <div class="sr-group-label support-label" style="font-size:0.72rem;margin-top:0.5rem;margin-bottom:0.3rem">⬇ Support</div>
+        ${srRows(s.support, "support")}
+      </div>
+    </div>`;
 }
 
 function toggleGuide(btn) {
