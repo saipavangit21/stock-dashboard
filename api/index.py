@@ -213,6 +213,82 @@ def get_support_resistance(ticker: str, current_price: float) -> dict:
         return {"support": [], "resistance": []}
 
 
+def get_market_regime(index_ticker: str) -> dict:
+    """
+    Determine broad market regime from an index (SPY for US, ^NSEI for India).
+    Uses SMA trend, RSI, and recent momentum to classify:
+      bullish  — trend up, momentum positive
+      bearish  — trend down, momentum negative
+      ranging  — mixed signals
+      rally    — oversold bounce (sharp up move from low base)
+      selloff  — overbought collapse (sharp down from high base)
+    """
+    try:
+        raw   = yf.Ticker(index_ticker).history(period="6mo")
+        close = raw["Close"]
+
+        sma20   = float(close.rolling(20).mean().iloc[-1])
+        sma50   = float(close.rolling(50).mean().iloc[-1])
+        price   = float(close.iloc[-1])
+        ret5    = float(close.pct_change(5).iloc[-1] * 100)
+        ret1    = float(close.pct_change(1).iloc[-1] * 100)
+
+        delta = close.diff()
+        gain  = delta.where(delta > 0, 0).rolling(14).mean()
+        loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rsi   = float((100 - (100 / (1 + gain / loss))).iloc[-1])
+
+        above_sma20 = price > sma20
+        above_sma50 = price > sma50
+
+        # Classify regime
+        if rsi < 35 and ret5 < -5 and ret1 > 1.5:
+            regime = "rally"
+            label  = "Relief Rally"
+            desc   = "Market bouncing from oversold — technical signals unreliable, momentum overrides"
+            color  = "neutral"
+        elif rsi > 65 and ret5 > 5:
+            regime = "overbought"
+            label  = "Overbought / Extended"
+            desc   = "Market extended after a run — sell signals stronger, buy signals risky"
+            color  = "down"
+        elif above_sma20 and above_sma50 and rsi > 50:
+            regime = "bullish"
+            label  = "Bullish Trend"
+            desc   = "Market in uptrend — buy signals more reliable, sell signals against the tide"
+            color  = "up"
+        elif not above_sma20 and not above_sma50 and rsi < 50:
+            regime = "bearish"
+            label  = "Bearish Trend"
+            desc   = "Market in downtrend — sell signals more reliable, buy signals are counter-trend"
+            color  = "down"
+        elif rsi < 40 and ret5 < -3:
+            regime = "selloff"
+            label  = "Active Selloff"
+            desc   = "Market selling off — avoid buying dips until stabilisation, no bottom confirmed"
+            color  = "down"
+        else:
+            regime = "ranging"
+            label  = "Ranging / Neutral"
+            desc   = "No clear trend — signals have lower reliability in either direction"
+            color  = "neutral"
+
+        return {
+            "regime":  regime,
+            "label":   label,
+            "desc":    desc,
+            "color":   color,
+            "rsi":     round(rsi, 1),
+            "ret5":    round(ret5, 2),
+            "ret1":    round(ret1, 2),
+            "price":   round(price, 2),
+            "vs_sma20": round((price / sma20 - 1) * 100, 2),
+            "vs_sma50": round((price / sma50 - 1) * 100, 2),
+        }
+    except Exception:
+        return {"regime": "unknown", "label": "Unknown", "desc": "Could not determine market regime", "color": "neutral"}
+
+
 def get_pcr(ticker: str) -> float:
     """
     Put/Call Ratio from nearest options expiry.
@@ -519,9 +595,12 @@ def api_scan():
     us_buy,    us_sell    = pick(us_results)
     india_buy, india_sell = pick(india_results)
 
+    us_regime    = get_market_regime("SPY")
+    india_regime = get_market_regime("^NSEI")
+
     return jsonify({
-        "us":    {"buy": us_buy,    "sell": us_sell,    "scanned": len(us_results)},
-        "india": {"buy": india_buy, "sell": india_sell, "scanned": len(india_results)},
+        "us":    {"buy": us_buy,    "sell": us_sell,    "scanned": len(us_results),    "regime": us_regime},
+        "india": {"buy": india_buy, "sell": india_sell, "scanned": len(india_results), "regime": india_regime},
         "generated_at": datetime.utcnow().isoformat() + "Z",
     })
 
@@ -755,6 +834,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .guide-pts.bull { color: var(--up); }
   .guide-pts.bear { color: var(--down); }
   .guide-note { font-size: 0.75rem; color: var(--muted); margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid var(--border); line-height: 1.6; }
+
+  /* ── Regime Banner ── */
+  .regime-banner {
+    border-radius: 10px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.8rem;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.8rem;
+    font-size: 0.82rem;
+    border: 1px solid;
+  }
+  .regime-banner.up      { background: rgba(34,197,94,0.08);  border-color: rgba(34,197,94,0.3);  }
+  .regime-banner.down    { background: rgba(239,68,68,0.08);  border-color: rgba(239,68,68,0.3);  }
+  .regime-banner.neutral { background: rgba(245,158,11,0.08); border-color: rgba(245,158,11,0.3); }
+  .regime-icon  { font-size: 1.2rem; flex-shrink: 0; margin-top: 1px; }
+  .regime-label { font-weight: 700; margin-bottom: 2px; }
+  .regime-desc  { color: var(--muted); line-height: 1.4; }
+  .regime-stats { display: flex; gap: 0.8rem; margin-top: 0.4rem; font-size: 0.72rem; color: var(--muted); }
+  .regime-stats span { background: var(--bg); border-radius: 4px; padding: 0.1rem 0.4rem; }
 
   /* ── Market Scan ── */
   #scan-section { margin-bottom: 2.5rem; }
@@ -1285,11 +1384,32 @@ function scanCard(market, action, s) {
     </div>`;
 }
 
+function regimeBanner(region, r) {
+  const icons = { bullish:"📈", bearish:"📉", selloff:"🔻", rally:"⚡", overbought:"🔥", ranging:"↔️", unknown:"❓" };
+  const icon  = icons[r.regime] || "❓";
+  return `
+    <div class="regime-banner ${r.color}" style="grid-column:1/-1">
+      <span class="regime-icon">${icon}</span>
+      <div>
+        <div class="regime-label">${region} Market Regime: ${r.label}</div>
+        <div class="regime-desc">${r.desc}</div>
+        <div class="regime-stats">
+          <span>RSI ${r.rsi}</span>
+          <span>5d ${r.ret5 > 0 ? "+" : ""}${r.ret5}%</span>
+          <span>vs SMA20 ${r.vs_sma20 > 0 ? "+" : ""}${r.vs_sma20}%</span>
+          <span>vs SMA50 ${r.vs_sma50 > 0 ? "+" : ""}${r.vs_sma50}%</span>
+        </div>
+      </div>
+    </div>`;
+}
+
 function renderScan(data) {
   const cards = document.getElementById("scan-cards");
   cards.innerHTML =
+    regimeBanner("🇺🇸 US",    data.us.regime)    +
     scanCard("🇺🇸 US",    "buy",  data.us.buy)    +
     scanCard("🇺🇸 US",    "sell", data.us.sell)   +
+    regimeBanner("🇮🇳 India", data.india.regime) +
     scanCard("🇮🇳 India", "buy",  data.india.buy)  +
     scanCard("🇮🇳 India", "sell", data.india.sell);
 
