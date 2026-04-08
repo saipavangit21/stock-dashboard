@@ -339,10 +339,11 @@ def scan_ticker(ticker: str) -> dict | None:
         sma50 = close.rolling(50).mean().iloc[-1]
         sma_ratio = float(sma10 / sma50)
 
-        delta = close.diff()
-        gain  = delta.where(delta > 0, 0).rolling(14).mean()
-        loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rsi   = float(100 - (100 / (1 + gain / loss)).iloc[-1])
+        delta    = close.diff()
+        gain     = delta.where(delta > 0, 0).rolling(14).mean()
+        loss     = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rsi_series = 100 - (100 / (1 + gain / loss))
+        rsi      = float(rsi_series.iloc[-1])
 
         ema12     = close.ewm(span=12).mean()
         ema26     = close.ewm(span=26).mean()
@@ -351,44 +352,63 @@ def scan_ticker(ticker: str) -> dict | None:
 
         rm  = close.rolling(20).mean()
         rs  = close.rolling(20).std()
-        bb_pos = float(((close - (rm - 2*rs)) / (4*rs)).iloc[-1])
+        bb_series = (close - (rm - 2*rs)) / (4*rs)
+        bb_pos    = float(bb_series.iloc[-1])
 
         vol_ratio = float((volume / volume.rolling(10).mean()).iloc[-1])
         price     = round(float(close.iloc[-1]), 2)
 
+        # ── Z-scores: compare current value vs this stock's own history ──
+        # This prevents flagging persistently strong stocks (UNH, HCLTECH)
+        # as overbought just because their normal RSI runs high.
+        rsi_mean  = float(rsi_series.mean())
+        rsi_std   = float(rsi_series.std())
+        rsi_z     = (rsi - rsi_mean) / rsi_std if rsi_std > 0 else 0.0
+
+        bb_mean   = float(bb_series.mean())
+        bb_std    = float(bb_series.std())
+        bb_z      = (bb_pos - bb_mean) / bb_std if bb_std > 0 else 0.0
+
+        sma_series = close.rolling(10).mean() / close.rolling(50).mean()
+        sma_mean   = float(sma_series.mean())
+        sma_std    = float(sma_series.std())
+        sma_z      = (sma_ratio - sma_mean) / sma_std if sma_std > 0 else 0.0
+
         pcr = get_pcr(ticker)
 
-        # ── Buy score ───────────────────────────────────────────────
+        # ── Buy score (z-score based) ────────────────────────────────
+        # RSI z < -1.5 means genuinely oversold *for this stock*
         buy = 0.0
-        if rsi < 30:   buy += 3.0
-        elif rsi < 40: buy += 1.5
-        elif rsi < 50: buy += 0.5
-        if macd_hist > 0:    buy += 1.5
-        if bb_pos < 0.2:     buy += 2.0
-        elif bb_pos < 0.4:   buy += 1.0
-        if sma_ratio > 1.0:  buy += 1.0
-        if vol_ratio > 2.0:  buy += 1.0
-        elif vol_ratio > 1.5: buy += 0.5
-        if ret5 < -0.05:     buy += 1.5   # dip
+        if rsi_z < -2.0:   buy += 3.0
+        elif rsi_z < -1.5: buy += 1.5
+        elif rsi_z < -1.0: buy += 0.5
+        if macd_hist > 0:      buy += 1.5
+        if bb_z < -1.5:        buy += 2.0
+        elif bb_z < -1.0:      buy += 1.0
+        if sma_z > 0.5:        buy += 1.0   # short-term trend above its own norm
+        if vol_ratio > 2.0:    buy += 1.0
+        elif vol_ratio > 1.5:  buy += 0.5
+        if ret5 < -0.05:       buy += 1.5
         if pcr is not None:
-            if pcr > 1.3:    buy += 1.5
-            elif pcr > 1.0:  buy += 0.5
+            if pcr > 1.3:      buy += 1.5
+            elif pcr > 1.0:    buy += 0.5
 
-        # ── Sell score ──────────────────────────────────────────────
+        # ── Sell score (z-score based) ───────────────────────────────
+        # RSI z > +1.5 means genuinely overbought *for this stock*
         sell = 0.0
-        if rsi > 70:   sell += 3.0
-        elif rsi > 60: sell += 1.5
-        elif rsi > 55: sell += 0.5
-        if macd_hist < 0:    sell += 1.5
-        if bb_pos > 0.8:     sell += 2.0
-        elif bb_pos > 0.6:   sell += 1.0
-        if sma_ratio < 1.0:  sell += 1.0
-        if vol_ratio > 2.0:  sell += 1.0
-        elif vol_ratio > 1.5: sell += 0.5
-        if ret5 > 0.08:      sell += 1.5  # extended
+        if rsi_z > 2.0:    sell += 3.0
+        elif rsi_z > 1.5:  sell += 1.5
+        elif rsi_z > 1.0:  sell += 0.5
+        if macd_hist < 0:      sell += 1.5
+        if bb_z > 1.5:         sell += 2.0
+        elif bb_z > 1.0:       sell += 1.0
+        if sma_z < -0.5:       sell += 1.0  # short-term trend below its own norm
+        if vol_ratio > 2.0:    sell += 1.0
+        elif vol_ratio > 1.5:  sell += 0.5
+        if ret5 > 0.08:        sell += 1.5
         if pcr is not None:
-            if pcr < 0.6:    sell += 1.5
-            elif pcr < 0.8:  sell += 0.5
+            if pcr < 0.6:      sell += 1.5
+            elif pcr < 0.8:    sell += 0.5
 
         # Reuse already-downloaded data — avoids a second yfinance call per ticker
         sr = compute_support_resistance(
@@ -401,9 +421,13 @@ def scan_ticker(ticker: str) -> dict | None:
             "buy_score":  round(buy, 2),
             "sell_score": round(sell, 2),
             "rsi":        round(rsi, 1),
-            "macd_hist":  round(macd_hist, 4),
+            "rsi_z":      round(rsi_z, 2),
+            "rsi_mean":   round(rsi_mean, 1),
             "bb_pos":     round(bb_pos, 3),
+            "bb_z":       round(bb_z, 2),
+            "macd_hist":  round(macd_hist, 4),
             "sma_ratio":  round(sma_ratio, 4),
+            "sma_z":      round(sma_z, 2),
             "vol_ratio":  round(vol_ratio, 2),
             "ret5":       round(ret5 * 100, 2),
             "pcr":        pcr,
@@ -1321,19 +1345,30 @@ async function runScan() {
 
 function scanReasons(s, action) {
   const tags = [];
+  const rz = s.rsi_z ?? 0;
+  const bz = s.bb_z  ?? 0;
+  const sz = s.sma_z ?? 0;
+  const baseline = s.rsi_mean ? ` (stock avg: ${s.rsi_mean})` : "";
+
   if (action === "buy") {
-    if (s.rsi < 35)        tags.push({t:`RSI ${s.rsi} (oversold)`, c:"bull"});
+    if (rz < -2.0)         tags.push({t:`RSI ${s.rsi} — very oversold vs own history${baseline}`, c:"bull"});
+    else if (rz < -1.5)    tags.push({t:`RSI ${s.rsi} — oversold vs own history${baseline}`, c:"bull"});
+    else if (rz < -1.0)    tags.push({t:`RSI ${s.rsi} — mildly low vs own history${baseline}`, c:"bull"});
     if (s.macd_hist > 0)   tags.push({t:`MACD bullish`, c:"bull"});
-    if (s.bb_pos < 0.3)    tags.push({t:`Near BB lower`, c:"bull"});
-    if (s.sma_ratio > 1)   tags.push({t:`SMA bullish`, c:"bull"});
+    if (bz < -1.5)         tags.push({t:`BB unusually low vs own history`, c:"bull"});
+    else if (bz < -1.0)    tags.push({t:`Near BB lower`, c:"bull"});
+    if (sz > 0.5)          tags.push({t:`SMA trend above norm`, c:"bull"});
     if (s.vol_ratio > 1.5) tags.push({t:`Vol spike ${s.vol_ratio}x`, c:"bull"});
     if (s.ret5 < -3)       tags.push({t:`-${Math.abs(s.ret5)}% dip in 5d`, c:"bull"});
     if (s.pcr && s.pcr > 1.2) tags.push({t:`PCR ${s.pcr} (fear)`, c:"bull"});
   } else {
-    if (s.rsi > 65)        tags.push({t:`RSI ${s.rsi} (overbought)`, c:"bear"});
+    if (rz > 2.0)          tags.push({t:`RSI ${s.rsi} — very overbought vs own history${baseline}`, c:"bear"});
+    else if (rz > 1.5)     tags.push({t:`RSI ${s.rsi} — overbought vs own history${baseline}`, c:"bear"});
+    else if (rz > 1.0)     tags.push({t:`RSI ${s.rsi} — mildly high vs own history${baseline}`, c:"bear"});
     if (s.macd_hist < 0)   tags.push({t:`MACD bearish`, c:"bear"});
-    if (s.bb_pos > 0.7)    tags.push({t:`Near BB upper`, c:"bear"});
-    if (s.sma_ratio < 1)   tags.push({t:`SMA bearish`, c:"bear"});
+    if (bz > 1.5)          tags.push({t:`BB unusually high vs own history`, c:"bear"});
+    else if (bz > 1.0)     tags.push({t:`Near BB upper`, c:"bear"});
+    if (sz < -0.5)         tags.push({t:`SMA trend below norm`, c:"bear"});
     if (s.vol_ratio > 1.5) tags.push({t:`Vol spike ${s.vol_ratio}x`, c:"bear"});
     if (s.ret5 > 5)        tags.push({t:`+${s.ret5}% run in 5d`, c:"bear"});
     if (s.pcr && s.pcr < 0.7) tags.push({t:`PCR ${s.pcr} (greed)`, c:"bear"});
