@@ -545,11 +545,22 @@ def api_predict():
         except Exception as e:
             errors.append({"ticker": t, "error": str(e)})
 
-    return jsonify({
+    return jsonify(sanitize({
         "predictions": results,
         "errors":      errors,
         "generated_at": datetime.utcnow().isoformat() + "Z",
-    })
+    }))
+
+
+def sanitize(obj):
+    """Recursively replace NaN/Inf floats with None so JSON stays valid."""
+    if isinstance(obj, float):
+        return None if (obj != obj or obj == float("inf") or obj == float("-inf")) else obj
+    if isinstance(obj, dict):
+        return {k: sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize(v) for v in obj]
+    return obj
 
 
 @app.route("/api/scan")
@@ -598,11 +609,11 @@ def api_scan():
     us_regime    = get_market_regime("SPY")
     india_regime = get_market_regime("^NSEI")
 
-    return jsonify({
+    return jsonify(sanitize({
         "us":    {"buy": us_buy,    "sell": us_sell,    "scanned": len(us_results),    "regime": us_regime},
         "india": {"buy": india_buy, "sell": india_sell, "scanned": len(india_results), "regime": india_regime},
         "generated_at": datetime.utcnow().isoformat() + "Z",
-    })
+    }))
 
 
 @app.route("/api/penny")
@@ -622,12 +633,12 @@ def api_penny():
     top_buys  = sorted([r for r in results if r["buy_score"]  >= 3.0], key=lambda x: x["buy_score"],  reverse=True)[:3]
     top_sells = sorted([r for r in results if r["sell_score"] >= 3.0], key=lambda x: x["sell_score"], reverse=True)[:3]
 
-    return jsonify({
+    return jsonify(sanitize({
         "buys":         top_buys,
         "sells":        top_sells,
         "scanned":      len(results),
         "generated_at": datetime.utcnow().isoformat() + "Z",
-    })
+    }))
 
 
 @app.route("/")
