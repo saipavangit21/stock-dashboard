@@ -1232,8 +1232,20 @@ function scanReasons(s, action) {
 }
 
 function srRows(levels, type) {
-  if (!levels || !levels.length) return `<div class="sr-empty">No historical levels found nearby</div>`;
-  return levels.map(l => {
+  if (!levels || !levels.length) {
+    const msg = type === "resistance"
+      ? "No ceiling found — stock may be near all-time highs"
+      : "No nearby floor — high downside risk if it breaks down";
+    const col = type === "resistance" ? "var(--neutral)" : "var(--down)";
+    return `<div class="sr-empty" style="color:${col}">${msg}</div>`;
+  }
+
+  const allFar = levels.every(l => l.pct_away > 10);
+  const warning = allFar
+    ? `<div style="font-size:0.7rem;color:var(--down);margin-bottom:0.3rem">⚠️ All levels are far — no nearby ${type} zone, elevated risk</div>`
+    : "";
+
+  return warning + levels.map(l => {
     const far  = l.pct_away > 10;
     const note = far ? ` <span style="color:var(--neutral);font-size:0.68rem">(far)</span>` : "";
     const col  = far ? "color:var(--muted)" : "";
