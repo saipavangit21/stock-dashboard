@@ -27,8 +27,9 @@ app = Flask(__name__)
 
 # ── Global model cache ─────────────────────────────────────────────────────────
 # Persists across warm Lambda invocations so we don't retrain on every request.
-_cache = {}
-_lock  = threading.Lock()
+_cache      = {}
+_cache_date = {}   # tracks which date each ticker was last trained
+_lock       = threading.Lock()
 
 STOCKS     = ["AAPL", "MSFT", "TSLA", "NVDA", "^NSEI", "BDMD"]
 START_DATE = "2022-01-01"   # 2 years keeps training fast for serverless
@@ -490,10 +491,12 @@ def train(ticker: str) -> dict:
 
 
 def get_model(ticker: str) -> dict:
-    """Return cached model or train a new one."""
+    """Return cached model, retraining if cache is from a previous day."""
+    today = datetime.today().date()
     with _lock:
-        if ticker not in _cache:
-            _cache[ticker] = train(ticker)
+        if ticker not in _cache or _cache_date.get(ticker) != today:
+            _cache[ticker]      = train(ticker)
+            _cache_date[ticker] = today
         return _cache[ticker]
 
 
@@ -516,8 +519,15 @@ def predict_one(ticker: str) -> dict:
     sentiment_score, headlines = get_sentiment(ticker)
 
     # Latest indicator values
-    last          = df.iloc[-1]
-    current_price = round(float(last["Close"]), 2)
+    last = df.iloc[-1]
+
+    # Fetch live price — don't use cached training data's last close
+    # (cache can be hours/days old on warm serverless instances)
+    try:
+        live = yf.Ticker(ticker).history(period="1d")
+        current_price = round(float(live["Close"].iloc[-1]), 2) if not live.empty else round(float(last["Close"]), 2)
+    except Exception:
+        current_price = round(float(last["Close"]), 2)
 
     # Historical support & resistance (from 6+ years of swing data)
     sr = get_support_resistance(ticker, current_price)
