@@ -1315,6 +1315,7 @@ function pennyCard(s, action) {
       <div class="bar-track"><div class="bar-fill ${action === "buy" ? "up" : "down"}" style="width:${pct}%"></div></div>
       <div class="scan-reason" style="margin-top:0.5rem">${scanReasons(s, action) || "<span>Multiple signals aligned</span>"}</div>
       ${volWarn}
+      ${verdict(s)}
       ${s.pcr ? `<div style="font-size:0.72rem;color:var(--muted);margin-top:0.4rem">Put/Call Ratio: ${s.pcr}</div>` : ""}
       <div class="sr-section" style="margin-top:0.8rem">
         <div class="sr-group-label resistance-label" style="font-size:0.72rem;margin-bottom:0.3rem">⬆ Resistance</div>
@@ -1433,12 +1434,60 @@ function scanCard(market, action, s) {
       <div class="bar-track"><div class="bar-fill ${action === "buy" ? "up" : "down"}" style="width:${pct}%"></div></div>
       <div class="scan-reason">${scanReasons(s, action) || "<span>Multiple signals aligned</span>"}</div>
       ${s.pcr ? `<div style="font-size:0.72rem;color:var(--muted);margin-top:0.5rem">Put/Call Ratio: ${s.pcr}</div>` : ""}
+      ${verdict(s)}
 
       <div class="sr-section">
         <div class="sr-group-label resistance-label" style="font-size:0.72rem;margin-bottom:0.35rem">⬆ Resistance — where to take profit / stop if shorting</div>
         ${srRows(s.resistance, "resistance")}
         <div class="sr-group-label support-label" style="font-size:0.72rem;margin-top:0.6rem;margin-bottom:0.35rem">⬇ Support — where to set stop-loss / entry on dip</div>
         ${srRows(s.support, "support")}
+      </div>
+    </div>`;
+}
+
+function verdict(s) {
+  // Combine buy and sell scores into a single decisive verdict
+  const net = (s.buy_score || 0) - (s.sell_score || 0);
+  const macdBull = s.macd_hist > 0;
+  const rz = s.rsi_z ?? 0;
+  const bz = s.bb_z  ?? 0;
+
+  let label, color, detail;
+
+  if (net >= 5) {
+    label = "STRONG BUY";  color = "#22c55e";
+    detail = "Multiple strong bullish signals aligned";
+  } else if (net >= 2.5) {
+    label = "BUY";         color = "#4ade80";
+    detail = "More buy signals than sell — lean long";
+  } else if (net >= 1 && macdBull) {
+    label = "WEAK BUY";    color = "#86efac";
+    detail = "Mild buy edge with bullish momentum — watch for confirmation";
+  } else if (net <= -5) {
+    label = "STRONG SELL"; color = "#ef4444";
+    detail = "Multiple strong bearish signals aligned";
+  } else if (net <= -2.5) {
+    label = "SELL";        color = "#f87171";
+    detail = "More sell signals than buy — lean short";
+  } else if (net <= -1 && !macdBull) {
+    label = "WEAK SELL";   color = "#fca5a5";
+    detail = "Mild sell edge with bearish momentum — watch for breakdown";
+  } else {
+    label = "HOLD / WAIT"; color = "#f59e0b";
+    detail = "Signals mixed or insufficient — no clear edge right now";
+  }
+
+  return `
+    <div style="margin-top:0.9rem;padding:0.6rem 0.9rem;border-radius:8px;background:${color}18;border:1px solid ${color}44;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px">Overall Verdict</div>
+        <div style="font-size:1rem;font-weight:800;color:${color}">${label}</div>
+        <div style="font-size:0.7rem;color:var(--muted);margin-top:2px">${detail}</div>
+      </div>
+      <div style="text-align:right;font-size:0.72rem;color:var(--muted)">
+        <div>Buy  <strong style="color:#22c55e">${s.buy_score}</strong></div>
+        <div>Sell <strong style="color:#ef4444">${s.sell_score}</strong></div>
+        <div>Net  <strong style="color:${color}">${net >= 0 ? "+" : ""}${net.toFixed(1)}</strong></div>
       </div>
     </div>`;
 }
@@ -1478,6 +1527,7 @@ function watchCard(s, action) {
       </div>
       <div class="scan-price">Price: <strong>${s.price}</strong> &nbsp;|&nbsp; 5d: ${s.ret5 > 0 ? "+" : ""}${s.ret5}%</div>
       <div class="scan-reason" style="margin:0.4rem 0">${scanReasons(s, action) || "<span>Watching for setup</span>"}</div>
+      ${verdict(s)}
       <div class="sr-section" style="margin-top:0.6rem">
         <div class="sr-group-label resistance-label" style="font-size:0.68rem;margin-bottom:0.25rem">⬆ Resistance</div>
         ${srRows(s.resistance, "resistance")}
