@@ -620,7 +620,7 @@ def api_scan():
 
     def pick(results):
         if not results:
-            return None, None
+            return None, None, [], []
         by_buy  = sorted(results, key=lambda x: x["buy_score"],  reverse=True)
         by_sell = sorted(results, key=lambda x: x["sell_score"], reverse=True)
 
@@ -629,23 +629,26 @@ def api_scan():
 
         # Avoid showing the same ticker as both buy and sell
         if best_buy and best_sell and best_buy["ticker"] == best_sell["ticker"]:
-            # Try the next candidate for the weaker signal
             if best_buy["buy_score"] >= best_sell["sell_score"]:
                 best_sell = next((r for r in by_sell[1:] if r["sell_score"] >= MIN_SELL_SCORE), None)
             else:
                 best_buy  = next((r for r in by_buy[1:]  if r["buy_score"]  >= MIN_BUY_SCORE),  None)
 
-        return best_buy, best_sell
+        # Always return top 3 watch candidates with S/R regardless of threshold
+        watch_buy  = [r for r in by_buy[:3]  if not best_buy  or r["ticker"] != best_buy["ticker"]][:3]
+        watch_sell = [r for r in by_sell[:3] if not best_sell or r["ticker"] != best_sell["ticker"]][:3]
 
-    us_buy,    us_sell    = pick(us_results)
-    india_buy, india_sell = pick(india_results)
+        return best_buy, best_sell, watch_buy, watch_sell
+
+    us_buy,    us_sell,    us_watch_buy,    us_watch_sell    = pick(us_results)
+    india_buy, india_sell, india_watch_buy, india_watch_sell = pick(india_results)
 
     us_regime    = get_market_regime("SPY")
     india_regime = get_market_regime("^NSEI")
 
     return jsonify(sanitize({
-        "us":    {"buy": us_buy,    "sell": us_sell,    "scanned": len(us_results),    "regime": us_regime},
-        "india": {"buy": india_buy, "sell": india_sell, "scanned": len(india_results), "regime": india_regime},
+        "us":    {"buy": us_buy,    "sell": us_sell,    "watch_buy": us_watch_buy,    "watch_sell": us_watch_sell,    "scanned": len(us_results),    "regime": us_regime},
+        "india": {"buy": india_buy, "sell": india_sell, "watch_buy": india_watch_buy, "watch_sell": india_watch_sell, "scanned": len(india_results), "regime": india_regime},
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }))
 
@@ -1440,6 +1443,11 @@ function scanCard(market, action, s) {
     </div>`;
 }
 
+function fmt(val, suffix="%") {
+  if (val === null || val === undefined || isNaN(val)) return "n/a";
+  return (val > 0 ? "+" : "") + val + suffix;
+}
+
 function regimeBanner(region, r) {
   const icons = { bullish:"📈", bearish:"📉", selloff:"🔻", rally:"⚡", overbought:"🔥", ranging:"↔️", unknown:"❓" };
   const icon  = icons[r.regime] || "❓";
@@ -1450,24 +1458,69 @@ function regimeBanner(region, r) {
         <div class="regime-label">${region} Market Regime: ${r.label}</div>
         <div class="regime-desc">${r.desc}</div>
         <div class="regime-stats">
-          <span>RSI ${r.rsi}</span>
-          <span>5d ${r.ret5 > 0 ? "+" : ""}${r.ret5}%</span>
-          <span>vs SMA20 ${r.vs_sma20 > 0 ? "+" : ""}${r.vs_sma20}%</span>
-          <span>vs SMA50 ${r.vs_sma50 > 0 ? "+" : ""}${r.vs_sma50}%</span>
+          <span>RSI ${r.rsi ?? "n/a"}</span>
+          <span>5d ${fmt(r.ret5)}</span>
+          <span>vs SMA20 ${fmt(r.vs_sma20)}</span>
+          <span>vs SMA50 ${fmt(r.vs_sma50)}</span>
         </div>
+      </div>
+    </div>`;
+}
+
+function watchCard(s, action) {
+  const score = action === "buy" ? s.buy_score : s.sell_score;
+  return `
+    <div class="scan-card ${action}-card" style="opacity:0.85">
+      <div class="scan-market-label">Watch · ${action === "buy" ? "↑ BUY candidate" : "↓ SELL candidate"}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
+        <span style="font-size:1.1rem;font-weight:800">${s.ticker.replace(".NS","")}</span>
+        <span style="font-size:0.78rem;color:var(--muted)">Score ${score}/12</span>
+      </div>
+      <div class="scan-price">Price: <strong>${s.price}</strong> &nbsp;|&nbsp; 5d: ${s.ret5 > 0 ? "+" : ""}${s.ret5}%</div>
+      <div class="scan-reason" style="margin:0.4rem 0">${scanReasons(s, action) || "<span>Watching for setup</span>"}</div>
+      <div class="sr-section" style="margin-top:0.6rem">
+        <div class="sr-group-label resistance-label" style="font-size:0.68rem;margin-bottom:0.25rem">⬆ Resistance</div>
+        ${srRows(s.resistance, "resistance")}
+        <div class="sr-group-label support-label" style="font-size:0.68rem;margin-top:0.4rem;margin-bottom:0.25rem">⬇ Support</div>
+        ${srRows(s.support, "support")}
       </div>
     </div>`;
 }
 
 function renderScan(data) {
   const cards = document.getElementById("scan-cards");
-  cards.innerHTML =
-    regimeBanner("🇺🇸 US",    data.us.regime)    +
-    scanCard("🇺🇸 US",    "buy",  data.us.buy)    +
-    scanCard("🇺🇸 US",    "sell", data.us.sell)   +
-    regimeBanner("🇮🇳 India", data.india.regime) +
-    scanCard("🇮🇳 India", "buy",  data.india.buy)  +
-    scanCard("🇮🇳 India", "sell", data.india.sell);
+
+  let html = "";
+
+  // US section
+  html += regimeBanner("🇺🇸 US", data.us.regime);
+  html += scanCard("🇺🇸 US", "buy",  data.us.buy);
+  html += scanCard("🇺🇸 US", "sell", data.us.sell);
+
+  // US watchlist when no strong signal
+  if (!data.us.buy || !data.us.sell) {
+    const watches = [...(data.us.watch_buy||[]), ...(data.us.watch_sell||[])].slice(0,3);
+    if (watches.length) {
+      html += `<div style="grid-column:1/-1;font-size:0.78rem;color:var(--muted);margin-top:0.3rem;margin-bottom:-0.4rem">No signal above threshold — top candidates with S&amp;R levels to watch:</div>`;
+      watches.forEach(s => { html += watchCard(s, s.buy_score >= s.sell_score ? "buy" : "sell"); });
+    }
+  }
+
+  // India section
+  html += regimeBanner("🇮🇳 India", data.india.regime);
+  html += scanCard("🇮🇳 India", "buy",  data.india.buy);
+  html += scanCard("🇮🇳 India", "sell", data.india.sell);
+
+  // India watchlist when no strong signal
+  if (!data.india.buy || !data.india.sell) {
+    const watches = [...(data.india.watch_buy||[]), ...(data.india.watch_sell||[])].slice(0,3);
+    if (watches.length) {
+      html += `<div style="grid-column:1/-1;font-size:0.78rem;color:var(--muted);margin-top:0.3rem;margin-bottom:-0.4rem">No signal above threshold — top candidates with S&amp;R levels to watch:</div>`;
+      watches.forEach(s => { html += watchCard(s, s.buy_score >= s.sell_score ? "buy" : "sell"); });
+    }
+  }
+
+  cards.innerHTML = html;
 
   const meta = document.createElement("div");
   meta.style.cssText = "font-size:0.72rem;color:var(--muted);margin-top:0.8rem;text-align:center;grid-column:1/-1";
