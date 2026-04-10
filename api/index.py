@@ -225,19 +225,22 @@ def get_market_regime(index_ticker: str) -> dict:
       selloff  — overbought collapse (sharp down from high base)
     """
     try:
-        raw   = yf.Ticker(index_ticker).history(period="6mo")
-        close = raw["Close"]
+        raw   = yf.Ticker(index_ticker).history(period="1y")
+        close = raw["Close"].dropna()
 
-        sma20   = float(close.rolling(20).mean().iloc[-1])
-        sma50   = float(close.rolling(50).mean().iloc[-1])
+        if len(close) < 52:
+            return {"regime": "unknown", "label": "Unknown", "desc": "Not enough data", "color": "neutral"}
+
+        sma20   = float(close.rolling(20).mean().dropna().iloc[-1])
+        sma50   = float(close.rolling(50).mean().dropna().iloc[-1])
         price   = float(close.iloc[-1])
-        ret5    = float(close.pct_change(5).iloc[-1] * 100)
-        ret1    = float(close.pct_change(1).iloc[-1] * 100)
+        ret5    = float(close.pct_change(5).dropna().iloc[-1] * 100)
+        ret1    = float(close.pct_change(1).dropna().iloc[-1] * 100)
 
         delta = close.diff()
         gain  = delta.where(delta > 0, 0).rolling(14).mean()
         loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rsi   = float((100 - (100 / (1 + gain / loss))).iloc[-1])
+        rsi   = float((100 - (100 / (1 + gain / loss))).dropna().iloc[-1])
 
         above_sma20 = price > sma20
         above_sma50 = price > sma50
