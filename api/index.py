@@ -1394,18 +1394,17 @@ function scanReasons(s, action) {
 function srRows(levels, type) {
   const isRes = type === "resistance";
   if (!levels || !levels.length) {
-    const msg = isRes ? "No ceiling — near all-time highs" : "No floor — high downside risk";
-    return `<span style="font-size:0.7rem;color:${isRes ? "var(--neutral)" : "var(--down)"}">${msg}</span>`;
+    const msg = isRes ? "No ceiling — near ATH" : "No floor — high downside risk";
+    return `<span style="color:${isRes ? "var(--neutral)" : "var(--down)"}">${msg}</span>`;
   }
-  const allFar = levels.every(l => l.pct_away > 10);
-  const warn = allFar ? `<span style="font-size:0.68rem;color:var(--down)">⚠ All far</span> ` : "";
-  const rows = levels.map(l => {
+  return levels.map(l => {
     const far = l.pct_away > 10;
     const col = far ? "var(--muted)" : (isRes ? "var(--down)" : "var(--up)");
     const sign = isRes ? "+" : "-";
-    return `<span style="color:${col};font-size:0.75rem;margin-right:0.6rem"><strong>${l.price}</strong> ${sign}${l.pct_away}%${far ? " ↗far" : ""} · ${l.touches}×</span>`;
+    const price = Number.isInteger(l.price) ? l.price : l.price.toFixed(1);
+    const tag = far ? " <span style='color:var(--neutral)'>(far)</span>" : "";
+    return `<div style="color:${col}">${price} &nbsp;<span style='color:var(--muted)'>${sign}${l.pct_away}% · ${l.touches}×${tag}</span></div>`;
   }).join("");
-  return warn + rows;
 }
 
 function scanCard(market, action, s) {
