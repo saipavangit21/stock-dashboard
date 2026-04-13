@@ -381,21 +381,29 @@ def scan_ticker(ticker: str) -> dict | None:
         pcr = get_pcr(ticker)
 
         # ── Buy score (z-score based) ────────────────────────────────
-        # RSI z < -1.5 means genuinely oversold *for this stock*
+        # Two modes: oversold dip OR momentum breakout
         buy = 0.0
+
+        # Dip/oversold signals
         if rsi_z < -2.0:   buy += 3.0
         elif rsi_z < -1.5: buy += 1.5
         elif rsi_z < -1.0: buy += 0.5
-        if macd_hist > 0:      buy += 1.5
         if bb_z < -1.5:        buy += 2.0
         elif bb_z < -1.0:      buy += 1.0
-        if sma_z > 0.5:        buy += 1.0   # short-term trend above its own norm
-        if vol_ratio > 2.0:    buy += 1.0
-        elif vol_ratio > 1.5:  buy += 0.5
         if ret5 < -0.05:       buy += 1.5
         if pcr is not None:
             if pcr > 1.3:      buy += 1.5
             elif pcr > 1.0:    buy += 0.5
+
+        # Momentum/breakout signals (work in bullish markets)
+        if macd_hist > 0:      buy += 1.5
+        if sma_z > 0.5:        buy += 1.0   # short-term trend above its own norm
+        if vol_ratio > 2.0:    buy += 1.5   # strong volume confirms breakout
+        elif vol_ratio > 1.5:  buy += 0.75
+        if rsi_z > 0.5 and macd_hist > 0 and sma_z > 0.3:
+            buy += 1.5   # momentum confluence: RSI rising + MACD bull + SMA bull
+        if ret5 > 0.03 and vol_ratio > 1.5:
+            buy += 1.0   # rising on above-avg volume = healthy momentum
 
         # ── Sell score (z-score based) ───────────────────────────────
         # RSI z > +1.5 means genuinely overbought *for this stock*
@@ -618,24 +626,28 @@ def api_scan():
     us_results     = scan_group(US_UNIVERSE)
     india_results  = scan_group(INDIA_UNIVERSE)
 
-    MIN_BUY_SCORE  = 4.0
-    MIN_SELL_SCORE = 4.0
-
-    def pick(results):
+    def pick(results, regime):
         if not results:
             return None, None, [], []
+
+        r = regime.get("regime", "ranging")
+        # Lower buy threshold in bullish markets (momentum signals fire at lower scores)
+        # Lower sell threshold in bearish markets
+        min_buy  = 3.0 if r in ("bullish", "rally")          else 4.0
+        min_sell = 3.0 if r in ("bearish", "selloff", "overbought") else 4.0
+
         by_buy  = sorted(results, key=lambda x: x["buy_score"],  reverse=True)
         by_sell = sorted(results, key=lambda x: x["sell_score"], reverse=True)
 
-        best_buy  = by_buy[0]  if by_buy[0]["buy_score"]   >= MIN_BUY_SCORE  else None
-        best_sell = by_sell[0] if by_sell[0]["sell_score"] >= MIN_SELL_SCORE else None
+        best_buy  = by_buy[0]  if by_buy[0]["buy_score"]   >= min_buy  else None
+        best_sell = by_sell[0] if by_sell[0]["sell_score"] >= min_sell else None
 
         # Avoid showing the same ticker as both buy and sell
         if best_buy and best_sell and best_buy["ticker"] == best_sell["ticker"]:
             if best_buy["buy_score"] >= best_sell["sell_score"]:
-                best_sell = next((r for r in by_sell[1:] if r["sell_score"] >= MIN_SELL_SCORE), None)
+                best_sell = next((r for r in by_sell[1:] if r["sell_score"] >= min_sell), None)
             else:
-                best_buy  = next((r for r in by_buy[1:]  if r["buy_score"]  >= MIN_BUY_SCORE),  None)
+                best_buy  = next((r for r in by_buy[1:]  if r["buy_score"]  >= min_buy),  None)
 
         # Always return top 3 watch candidates with S/R regardless of threshold
         watch_buy  = [r for r in by_buy[:3]  if not best_buy  or r["ticker"] != best_buy["ticker"]][:3]
@@ -643,11 +655,11 @@ def api_scan():
 
         return best_buy, best_sell, watch_buy, watch_sell
 
-    us_buy,    us_sell,    us_watch_buy,    us_watch_sell    = pick(us_results)
-    india_buy, india_sell, india_watch_buy, india_watch_sell = pick(india_results)
-
     us_regime    = get_market_regime("SPY")
     india_regime = get_market_regime("^NSEI")
+
+    us_buy,    us_sell,    us_watch_buy,    us_watch_sell    = pick(us_results,    us_regime)
+    india_buy, india_sell, india_watch_buy, india_watch_sell = pick(india_results, india_regime)
 
     return jsonify(sanitize({
         "us":    {"buy": us_buy,    "sell": us_sell,    "watch_buy": us_watch_buy,    "watch_sell": us_watch_sell,    "scanned": len(us_results),    "regime": us_regime},
@@ -1408,7 +1420,12 @@ function srRows(levels, type) {
 }
 
 function scanCard(market, action, s) {
-  if (!s) return `<div class="scan-card ${action}-card"><div class="scan-market-label">${market} · Best ${action.toUpperCase()}</div><div class="scan-action ${action}">${action === "buy" ? "↑ BUY" : "↓ SELL"}</div><div style="color:var(--muted);font-size:0.85rem;margin-top:0.5rem">No strong ${action} signal right now<br><span style="font-size:0.72rem">Score below threshold (4.0 / 12) — market may be ranging</span></div></div>`;
+  if (!s) {
+    const hint = action === "buy"
+      ? "No buy setup found — try Market Scan after US open when volume confirms direction"
+      : "No sell setup found — market may be trending up, sell signals are counter-trend";
+    return `<div class="scan-card ${action}-card"><div class="scan-market-label">${market} · Best ${action.toUpperCase()}</div><div class="scan-action ${action}">${action === "buy" ? "↑ BUY" : "↓ SELL"}</div><div style="color:var(--muted);font-size:0.82rem;margin-top:0.5rem">${hint}</div></div>`;
+  }
   const score = action === "buy" ? s.buy_score : s.sell_score;
   const maxScore = 12;
   const pct = Math.min(score / maxScore * 100, 100).toFixed(0);
