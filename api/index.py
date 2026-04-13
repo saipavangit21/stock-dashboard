@@ -1320,11 +1320,9 @@ function pennyCard(s, action) {
       ${volWarn}
       ${verdict(s)}
       ${s.pcr ? `<div style="font-size:0.72rem;color:var(--muted);margin-top:0.4rem">Put/Call Ratio: ${s.pcr}</div>` : ""}
-      <div class="sr-section" style="margin-top:0.8rem">
-        <div class="sr-group-label resistance-label" style="font-size:0.72rem;margin-bottom:0.3rem">⬆ Resistance</div>
-        ${srRows(s.resistance, "resistance")}
-        <div class="sr-group-label support-label" style="font-size:0.72rem;margin-top:0.5rem;margin-bottom:0.3rem">⬇ Support</div>
-        ${srRows(s.support, "support")}
+      <div class="sr-section" style="margin-top:0.6rem;padding-top:0.5rem">
+        <div style="font-size:0.68rem;color:var(--down);font-weight:700;margin-bottom:0.2rem">⬆ R: ${srRows(s.resistance, "resistance")}</div>
+        <div style="font-size:0.68rem;color:var(--up);font-weight:700;margin-top:0.2rem">⬇ S: ${srRows(s.support, "support")}</div>
       </div>
     </div>`;
 }
@@ -1394,31 +1392,20 @@ function scanReasons(s, action) {
 }
 
 function srRows(levels, type) {
+  const isRes = type === "resistance";
   if (!levels || !levels.length) {
-    const msg = type === "resistance"
-      ? "No ceiling found — stock may be near all-time highs"
-      : "No nearby floor — high downside risk if it breaks down";
-    const col = type === "resistance" ? "var(--neutral)" : "var(--down)";
-    return `<div class="sr-empty" style="color:${col}">${msg}</div>`;
+    const msg = isRes ? "No ceiling — near all-time highs" : "No floor — high downside risk";
+    return `<span style="font-size:0.7rem;color:${isRes ? "var(--neutral)" : "var(--down)"}">${msg}</span>`;
   }
-
   const allFar = levels.every(l => l.pct_away > 10);
-  const warning = allFar
-    ? `<div style="font-size:0.7rem;color:var(--down);margin-bottom:0.3rem">⚠️ All levels are far — no nearby ${type} zone, elevated risk</div>`
-    : "";
-
-  return warning + levels.map(l => {
-    const far  = l.pct_away > 10;
-    const note = far ? ` <span style="color:var(--neutral);font-size:0.68rem">(far)</span>` : "";
-    const col  = far ? "color:var(--muted)" : "";
-    return `
-    <div class="sr-row" style="${col}">
-      <span class="sr-price">${l.price}</span>
-      <span class="sr-pct">${type === "resistance" ? "+" : "-"}${l.pct_away}%${note}</span>
-      <span class="sr-touches">${l.touches} touches</span>
-      <div class="sr-bar-track"><div class="sr-bar-fill ${type === "resistance" ? "resistance-fill" : "support-fill"}" style="width:${Math.min(l.touches*10,100)}%"></div></div>
-    </div>`;
+  const warn = allFar ? `<span style="font-size:0.68rem;color:var(--down)">⚠ All far</span> ` : "";
+  const rows = levels.map(l => {
+    const far = l.pct_away > 10;
+    const col = far ? "var(--muted)" : (isRes ? "var(--down)" : "var(--up)");
+    const sign = isRes ? "+" : "-";
+    return `<span style="color:${col};font-size:0.75rem;margin-right:0.6rem"><strong>${l.price}</strong> ${sign}${l.pct_away}%${far ? " ↗far" : ""} · ${l.touches}×</span>`;
   }).join("");
+  return warn + rows;
 }
 
 function scanCard(market, action, s) {
@@ -1439,11 +1426,9 @@ function scanCard(market, action, s) {
       ${s.pcr ? `<div style="font-size:0.72rem;color:var(--muted);margin-top:0.5rem">Put/Call Ratio: ${s.pcr}</div>` : ""}
       ${verdict(s)}
 
-      <div class="sr-section">
-        <div class="sr-group-label resistance-label" style="font-size:0.72rem;margin-bottom:0.35rem">⬆ Resistance — where to take profit / stop if shorting</div>
-        ${srRows(s.resistance, "resistance")}
-        <div class="sr-group-label support-label" style="font-size:0.72rem;margin-top:0.6rem;margin-bottom:0.35rem">⬇ Support — where to set stop-loss / entry on dip</div>
-        ${srRows(s.support, "support")}
+      <div class="sr-section" style="margin-top:0.7rem;padding-top:0.6rem">
+        <div style="font-size:0.68rem;color:var(--down);font-weight:700;margin-bottom:0.2rem">⬆ R: ${srRows(s.resistance, "resistance")}</div>
+        <div style="font-size:0.68rem;color:var(--up);font-weight:700;margin-top:0.25rem">⬇ S: ${srRows(s.support, "support")}</div>
       </div>
     </div>`;
 }
@@ -1481,16 +1466,15 @@ function verdict(s) {
   }
 
   return `
-    <div style="margin-top:0.9rem;padding:0.6rem 0.9rem;border-radius:8px;background:${color}18;border:1px solid ${color}44;display:flex;justify-content:space-between;align-items:center">
+    <div style="margin-top:0.7rem;padding:0.45rem 0.8rem;border-radius:8px;background:${color}18;border:1px solid ${color}44;display:flex;justify-content:space-between;align-items:center;gap:0.5rem">
       <div>
-        <div style="font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px">Overall Verdict</div>
-        <div style="font-size:1rem;font-weight:800;color:${color}">${label}</div>
-        <div style="font-size:0.7rem;color:var(--muted);margin-top:2px">${detail}</div>
+        <div style="font-size:0.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em">Verdict</div>
+        <div style="font-size:0.9rem;font-weight:800;color:${color}">${label}</div>
       </div>
-      <div style="text-align:right;font-size:0.72rem;color:var(--muted)">
-        <div>Buy  <strong style="color:#22c55e">${s.buy_score}</strong></div>
-        <div>Sell <strong style="color:#ef4444">${s.sell_score}</strong></div>
-        <div>Net  <strong style="color:${color}">${net >= 0 ? "+" : ""}${net.toFixed(1)}</strong></div>
+      <div style="font-size:0.7rem;color:var(--muted);text-align:right">
+        <span style="color:#22c55e">B ${s.buy_score}</span> &nbsp;
+        <span style="color:#ef4444">S ${s.sell_score}</span> &nbsp;
+        <span style="color:${color};font-weight:700">Net ${net >= 0 ? "+" : ""}${net.toFixed(1)}</span>
       </div>
     </div>`;
 }
@@ -1531,11 +1515,9 @@ function watchCard(s, action) {
       <div class="scan-price">Price: <strong>${s.price}</strong> &nbsp;|&nbsp; 5d: ${s.ret5 > 0 ? "+" : ""}${s.ret5}%</div>
       <div class="scan-reason" style="margin:0.4rem 0">${scanReasons(s, action) || "<span>Watching for setup</span>"}</div>
       ${verdict(s)}
-      <div class="sr-section" style="margin-top:0.6rem">
-        <div class="sr-group-label resistance-label" style="font-size:0.68rem;margin-bottom:0.25rem">⬆ Resistance</div>
-        ${srRows(s.resistance, "resistance")}
-        <div class="sr-group-label support-label" style="font-size:0.68rem;margin-top:0.4rem;margin-bottom:0.25rem">⬇ Support</div>
-        ${srRows(s.support, "support")}
+      <div class="sr-section" style="margin-top:0.5rem;padding-top:0.5rem">
+        <div style="font-size:0.68rem;color:var(--down);font-weight:700;margin-bottom:0.2rem">⬆ R: ${srRows(s.resistance, "resistance")}</div>
+        <div style="font-size:0.68rem;color:var(--up);font-weight:700;margin-top:0.2rem">⬇ S: ${srRows(s.support, "support")}</div>
       </div>
     </div>`;
 }
