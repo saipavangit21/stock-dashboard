@@ -726,91 +726,197 @@ def api_chart():
 
 @app.route("/api/analyze")
 def api_analyze():
+    """
+    Pure technical-indicator analysis — no external LLM required.
+    Scores RSI z-score, MACD, BB z-score, SMA trend, volume, momentum,
+    news sentiment, then derives verdict / confidence / entry / target / stop.
+    """
     ticker = request.args.get("ticker", "AAPL").upper()
     try:
-        import anthropic as ac
-        import os
+        raw    = yf.Ticker(ticker).history(period="3y")
+        close  = raw["Close"].dropna()
+        volume = raw["Volume"].dropna()
+        if len(close) < 60:
+            return jsonify({"error": "Not enough data"}), 404
 
-        # Compute indicators
-        raw   = yf.Ticker(ticker).history(period="1y")
-        close = raw["Close"].dropna()
-        volume= raw["Volume"].dropna()
         price = round(float(close.iloc[-1]), 2)
-        ret1  = round(float(close.pct_change().iloc[-1]*100), 2)
-        ret5  = round(float(close.pct_change(5).iloc[-1]*100), 2)
-        ret20 = round(float(close.pct_change(20).iloc[-1]*100), 2)
+        ret1  = round(float(close.pct_change(1).iloc[-1]  * 100), 2)
+        ret5  = round(float(close.pct_change(5).iloc[-1]  * 100), 2)
+        ret20 = round(float(close.pct_change(20).iloc[-1] * 100), 2)
 
-        delta = close.diff()
-        rsi_s = 100-(100/(1+(delta.where(delta>0,0).rolling(14).mean())/(-delta.where(delta<0,0)).rolling(14).mean()))
-        rsi   = round(float(rsi_s.dropna().iloc[-1]), 1)
+        # RSI with z-score (3yr history normalises per-stock baseline)
+        delta    = close.diff()
+        gain     = delta.where(delta > 0, 0).rolling(14).mean()
+        loss     = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rsi_s    = 100 - (100 / (1 + gain / loss))
+        rsi      = round(float(rsi_s.dropna().iloc[-1]), 1)
+        rsi_mean = float(rsi_s.mean())
+        rsi_std  = float(rsi_s.std())
+        rsi_z    = round((rsi - rsi_mean) / rsi_std if rsi_std > 0 else 0.0, 2)
 
+        # MACD histogram
         ema12 = close.ewm(span=12).mean()
         ema26 = close.ewm(span=26).mean()
         macd  = ema12 - ema26
         mh    = round(float((macd - macd.ewm(span=9).mean()).dropna().iloc[-1]), 4)
+        # MACD trend: count recent bars above zero
+        macd_hist_series = (macd - macd.ewm(span=9).mean()).dropna()
+        macd_bull_bars   = int((macd_hist_series.iloc[-5:] > 0).sum())
 
-        sma50  = round(float(close.rolling(50).mean().dropna().iloc[-1]), 2)
-        sma200 = round(float(close.rolling(200).mean().dropna().iloc[-1]), 2) if len(close)>=200 else sma50
-        rm = close.rolling(20).mean(); rs = close.rolling(20).std()
-        bb_pos = round(float(((close-(rm-2*rs))/(4*rs)).dropna().iloc[-1]), 3)
-        vol_r  = round(float((volume/volume.rolling(10).mean()).dropna().iloc[-1]), 2)
+        # Bollinger Band z-score
+        rm       = close.rolling(20).mean()
+        rs       = close.rolling(20).std()
+        bb_s     = (close - (rm - 2*rs)) / (4*rs)
+        bb_pos   = round(float(bb_s.dropna().iloc[-1]), 3)
+        bb_mean  = float(bb_s.mean())
+        bb_std   = float(bb_s.std())
+        bb_z     = round((bb_pos - bb_mean) / bb_std if bb_std > 0 else 0.0, 2)
 
-        sr = get_support_resistance(ticker, price)
-        sentiment_score, headlines = get_sentiment(ticker)
-        news_text = "; ".join([h["title"] for h in headlines[:5]]) or "No recent news"
+        # SMA trend
+        sma50    = round(float(close.rolling(50).mean().dropna().iloc[-1]), 2)
+        sma200   = round(float(close.rolling(200).mean().dropna().iloc[-1]), 2) if len(close) >= 200 else sma50
+        sma10_s  = close.rolling(10).mean() / close.rolling(50).mean()
+        sma_z    = round(float((sma10_s.iloc[-1] - sma10_s.mean()) / sma10_s.std()), 2) if sma10_s.std() > 0 else 0.0
+        sma50_pct  = round((price / sma50  - 1) * 100, 1)
+        sma200_pct = round((price / sma200 - 1) * 100, 1)
 
-        # Build prompt
-        prompt = f"""You are a professional stock analyst. Analyze {ticker} and give a clear buy/sell/hold verdict.
+        # Volume ratio
+        vol_r = round(float((volume / volume.rolling(10).mean()).dropna().iloc[-1]), 2)
 
-Current Data:
-- Price: {price}
-- 1d change: {ret1}%, 5d: {ret5}%, 20d: {ret20}%
-- RSI(14): {rsi} {'[oversold]' if rsi<35 else '[overbought]' if rsi>65 else '[neutral]'}
-- MACD histogram: {mh} ({'bullish' if mh>0 else 'bearish'})
-- BB position: {bb_pos} (0=lower band, 1=upper band)
-- Price vs SMA50: {round((price/sma50-1)*100,1)}%
-- Price vs SMA200: {round((price/sma200-1)*100,1)}%
-- Volume ratio: {vol_r}x (vs 10-day avg)
-- News sentiment score: {sentiment_score} (-1 to +1)
-- Recent headlines: {news_text}
-- Nearest resistance: {sr['resistance'][0]['price'] if sr['resistance'] else 'N/A'} ({sr['resistance'][0]['pct_away'] if sr['resistance'] else 'N/A'}% away)
-- Nearest support: {sr['support'][0]['price'] if sr['support'] else 'N/A'} ({sr['support'][0]['pct_away'] if sr['support'] else 'N/A'}% away)
+        # News sentiment
+        sentiment_score, _ = get_sentiment(ticker)
 
-Respond in this exact JSON format:
-{{
-  "verdict": "BUY" | "SELL" | "HOLD",
-  "confidence": "High" | "Medium" | "Low",
-  "summary": "2-3 sentence plain English explanation",
-  "entry": "suggested entry price or range",
-  "target": "price target",
-  "stop_loss": "stop loss level",
-  "risk": "main risk to this trade",
-  "timeframe": "short-term (days)" | "medium-term (weeks)" | "long-term (months)"
-}}"""
+        # S/R levels
+        sr = compute_support_resistance(raw["High"].squeeze(), raw["Low"].squeeze(), price)
 
-        client = ac.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=512,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        import json as _json
-        raw_text = msg.content[0].text.strip()
-        # extract JSON from response
-        start = raw_text.find("{")
-        end   = raw_text.rfind("}") + 1
-        analysis = _json.loads(raw_text[start:end])
+        # ── Scoring (same logic as scan_ticker) ─────────────────────
+        buy = sell = 0.0
+
+        # RSI z-score
+        if   rsi_z < -2.0: buy  += 3.0
+        elif rsi_z < -1.5: buy  += 1.5
+        elif rsi_z < -1.0: buy  += 0.5
+        if   rsi_z >  2.0: sell += 3.0
+        elif rsi_z >  1.5: sell += 1.5
+        elif rsi_z >  1.0: sell += 0.5
+
+        # MACD
+        if mh > 0: buy  += 1.5
+        else:      sell += 1.5
+
+        # BB z-score
+        if   bb_z < -1.5: buy  += 2.0
+        elif bb_z < -1.0: buy  += 1.0
+        if   bb_z >  1.5: sell += 2.0
+        elif bb_z >  1.0: sell += 1.0
+
+        # SMA trend
+        if   sma_z >  0.5: buy  += 1.0
+        elif sma_z < -0.5: sell += 1.0
+
+        # Volume
+        if vol_r > 2.0:
+            if mh > 0: buy  += 1.5
+            else:      sell += 1.0
+        elif vol_r > 1.5:
+            if mh > 0: buy  += 0.75
+
+        # Recent return
+        if ret5 < -5:   buy  += 1.5
+        if ret5 >  8:   sell += 1.5
+
+        # Momentum confluence
+        if rsi_z > 0.5 and mh > 0 and sma_z > 0.3:
+            buy += 1.5
+        if ret5 > 3 and vol_r > 1.5:
+            buy += 1.0
+
+        # Sentiment nudge
+        if sentiment_score > 0.1:  buy  += 0.5
+        if sentiment_score < -0.1: sell += 0.5
+
+        buy  = round(buy,  2)
+        sell = round(sell, 2)
+
+        # ── Verdict ─────────────────────────────────────────────────
+        gap = buy - sell
+        if   gap >= 4: verdict, confidence = "BUY",  "High"
+        elif gap >= 2: verdict, confidence = "BUY",  "Medium"
+        elif gap >= 1: verdict, confidence = "BUY",  "Low"
+        elif gap <= -4: verdict, confidence = "SELL", "High"
+        elif gap <= -2: verdict, confidence = "SELL", "Medium"
+        elif gap <= -1: verdict, confidence = "SELL", "Low"
+        else:           verdict, confidence = "HOLD", "Low"
+
+        # ── Entry / Target / Stop-Loss from S/R ─────────────────────
+        nearest_sup = sr["support"][0]["price"]    if sr["support"]    else None
+        nearest_res = sr["resistance"][0]["price"] if sr["resistance"] else None
+
+        if verdict == "BUY":
+            entry     = f"${round(price, 2)} (current) or on dip to ${nearest_sup}" if nearest_sup else f"${price}"
+            target    = f"${nearest_res}" if nearest_res else f"${round(price * 1.08, 2)} (+8%)"
+            stop_loss = f"${round(nearest_sup * 0.985, 2)}" if nearest_sup else f"${round(price * 0.95, 2)} (-5%)"
+        elif verdict == "SELL":
+            entry     = f"${price} (exit now) or at bounce to ${nearest_res}" if nearest_res else f"${price}"
+            target    = f"${nearest_sup}" if nearest_sup else f"${round(price * 0.92, 2)} (-8%)"
+            stop_loss = f"${round(nearest_res * 1.015, 2)}" if nearest_res else f"${round(price * 1.05, 2)} (+5%)"
+        else:
+            entry     = f"Wait — watch ${nearest_sup} support / ${nearest_res} resistance" if nearest_sup and nearest_res else f"${price}"
+            target    = f"${nearest_res}" if nearest_res else "—"
+            stop_loss = f"${nearest_sup}" if nearest_sup else "—"
+
+        # ── Timeframe ────────────────────────────────────────────────
+        if   macd_bull_bars >= 4 and vol_r > 1.5: timeframe = "short-term (days)"
+        elif macd_bull_bars >= 2:                  timeframe = "medium-term (weeks)"
+        else:                                       timeframe = "medium-term (weeks)"
+
+        # ── Human-readable summary ───────────────────────────────────
+        rsi_desc  = "oversold" if rsi_z < -1.5 else "overbought" if rsi_z > 1.5 else "neutral"
+        macd_desc = "bullish" if mh > 0 else "bearish"
+        trend     = "above" if sma50_pct > 0 else "below"
+        reasons   = []
+        if rsi_z < -1.5:  reasons.append(f"RSI is historically low (z={rsi_z}) — dip signal")
+        if rsi_z >  1.5:  reasons.append(f"RSI is historically high (z={rsi_z}) — stretched")
+        if mh > 0:        reasons.append("MACD histogram bullish")
+        else:             reasons.append("MACD histogram bearish")
+        if bb_z < -1.5:   reasons.append("price at lower Bollinger Band extreme")
+        if bb_z >  1.5:   reasons.append("price at upper Bollinger Band extreme")
+        reasons.append(f"price {trend} SMA50 by {abs(sma50_pct)}%")
+        if vol_r > 1.5:   reasons.append(f"volume {vol_r}x above average confirms move")
+        if sentiment_score > 0.1:  reasons.append("news sentiment positive")
+        if sentiment_score < -0.1: reasons.append("news sentiment negative")
+        summary = f"RSI {rsi} ({rsi_desc}, z={rsi_z}), MACD {macd_desc}. " + \
+                  "; ".join(reasons[:3]) + f". Buy score {buy} vs Sell score {sell}."
+
+        risk_factors = []
+        if verdict == "BUY"  and sma200_pct < -10: risk_factors.append("price well below SMA200 — downtrend intact")
+        if verdict == "SELL" and sma200_pct >  10: risk_factors.append("strong uptrend may continue")
+        if abs(ret5) < 1:    risk_factors.append("low recent momentum")
+        if vol_r < 0.8:      risk_factors.append("low volume reduces conviction")
+        risk = "; ".join(risk_factors) if risk_factors else "Standard market and sector risk"
 
         return jsonify(sanitize({
-            "ticker":    ticker,
-            "price":     price,
-            "indicators": {"rsi": rsi, "macd_hist": mh, "bb_pos": bb_pos,
-                           "ret5": ret5, "ret20": ret20, "vol_ratio": vol_r,
-                           "sma50_pct": round((price/sma50-1)*100,1),
-                           "sma200_pct": round((price/sma200-1)*100,1)},
-            "analysis":  analysis,
-            "support":   sr["support"],
-            "resistance":sr["resistance"],
+            "ticker":  ticker,
+            "price":   price,
+            "indicators": {
+                "rsi": rsi, "rsi_z": rsi_z,
+                "macd_hist": mh, "bb_pos": bb_pos, "bb_z": bb_z,
+                "ret5": ret5, "ret20": ret20, "vol_ratio": vol_r,
+                "sma50_pct": sma50_pct, "sma200_pct": sma200_pct,
+                "buy_score": buy, "sell_score": sell,
+            },
+            "analysis": {
+                "verdict":    verdict,
+                "confidence": confidence,
+                "summary":    summary,
+                "entry":      entry,
+                "target":     target,
+                "stop_loss":  stop_loss,
+                "risk":       risk,
+                "timeframe":  timeframe,
+            },
+            "support":    sr["support"],
+            "resistance": sr["resistance"],
         }))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
