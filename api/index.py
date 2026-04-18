@@ -698,15 +698,21 @@ def api_chart():
     ticker = request.args.get("ticker", "AAPL").upper()
     period = request.args.get("period", "2y")
     try:
-        raw    = yf.Ticker(ticker).history(period=period)
+        # Use 1h interval for short periods, daily for longer
+        interval = "1h" if period in ("1d", "5d") else "1d"
+        raw = yf.Ticker(ticker).history(period=period, interval=interval)
         if raw.empty:
             return jsonify({"error": "No data"}), 404
-        info   = yf.Ticker(ticker).fast_info
-        name   = getattr(info, "name", ticker)
+        try:
+            info = yf.Ticker(ticker).fast_info
+            name = getattr(info, "name", ticker)
+        except Exception:
+            name = ticker
         result = []
         for dt, row in raw.iterrows():
+            label = dt.strftime("%H:%M") if interval == "1h" else str(dt.date())
             result.append({
-                "date":   str(dt.date()),
+                "date":   label,
                 "open":   round(float(row["Open"]),  2),
                 "high":   round(float(row["High"]),  2),
                 "low":    round(float(row["Low"]),   2),
@@ -1055,9 +1061,12 @@ header h1 span{color:var(--accent);}
     </div>
 
     <div class="period-row" id="period-row" style="display:none;">
+      <button class="period-btn" data-p="1d"  onclick="setPeriod(this)">1D</button>
+      <button class="period-btn" data-p="5d"  onclick="setPeriod(this)">1W</button>
+      <button class="period-btn" data-p="1mo" onclick="setPeriod(this)">1M</button>
       <button class="period-btn" data-p="6mo" onclick="setPeriod(this)">6M</button>
       <button class="period-btn active" data-p="2y" onclick="setPeriod(this)">2Y</button>
-      <button class="period-btn" data-p="5y" onclick="setPeriod(this)">5Y</button>
+      <button class="period-btn" data-p="5y"  onclick="setPeriod(this)">5Y</button>
     </div>
 
     <div id="chart-wrap" style="display:none;">
