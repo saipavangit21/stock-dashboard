@@ -925,133 +925,175 @@ def api_analyze():
 @app.route("/api/options")
 def api_options():
     """
-    NIFTY and Bank NIFTY options chain via nsepython (proxied through Indian IP).
-    Direct NSE API calls are blocked from Vercel/AWS datacenter IPs.
+    NIFTY and Bank NIFTY options chain via Angel One SmartAPI.
+    Requires env vars: ANGEL_API_KEY, ANGEL_CLIENT_CODE, ANGEL_PASSWORD, ANGEL_TOTP_SECRET
+    Register free at: smartapi.angelbroking.com
     """
+    import os, re, pyotp
     from datetime import date as _date
+    from SmartApi import SmartConnect
 
-    def nse_fetch(symbol):
-        """
-        nsepython.nsefetch() routes through arthwallet.com proxy (Indian IP)
-        to bypass NSE's block on Vercel/AWS datacenter IPs.
-        """
-        from nsepython import nsefetch
-        url  = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-        data = nsefetch(url)
-        if not data or "records" not in data:
-            keys = list(data.keys()) if data else "empty"
-            raise ValueError(f"nsepython proxy returned no usable data for {symbol}. Keys: {keys}")
-        return data
+    api_key     = os.environ.get("ANGEL_API_KEY",     "")
+    client_code = os.environ.get("ANGEL_CLIENT_CODE", "")
+    password    = os.environ.get("ANGEL_PASSWORD",    "")
+    totp_secret = os.environ.get("ANGEL_TOTP_SECRET", "")
 
-    def analyse(symbol, display_name):
+    NOT_CONFIGURED = {
+        "NIFTY":     {"error": "Angel One SmartAPI not configured. Add ANGEL_API_KEY, ANGEL_CLIENT_CODE, ANGEL_PASSWORD, ANGEL_TOTP_SECRET to Vercel env vars. Free signup: smartapi.angelbroking.com"},
+        "BANKNIFTY": {"error": "Same — see NIFTY message above"},
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+    if not all([api_key, client_code, password, totp_secret]):
+        return jsonify(NOT_CONFIGURED)
+
+    # ── Authenticate ────────────────────────────────────────────
+    try:
+        obj    = SmartConnect(api_key=api_key)
+        totp   = pyotp.TOTP(totp_secret).now()
+        sess   = obj.generateSession(client_code, password, totp)
+        if not sess.get("status"):
+            raise ValueError(sess.get("message", "Auth failed"))
+    except Exception as e:
+        err = str(e)
+        return jsonify({"NIFTY": {"error": err}, "BANKNIFTY": {"error": err},
+                        "generated_at": datetime.utcnow().isoformat() + "Z"})
+
+    MONTH_ABB = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+                 "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+
+    def parse_symbol(sym, ul):
+        """
+        Parse NSE F&O option symbol into (expiry_date, strike, opt_type).
+        Monthly: NIFTY25APR23000CE  → year=25, mon=APR
+        Weekly:  NIFTY2541923000CE  → year=25, month=4, day=19
+        """
+        s = sym.upper().replace(ul.upper(), "", 1)
+        # Monthly
+        m = re.match(r"^(\d{2})([A-Z]{3})(\d+)(CE|PE)$", s)
+        if m:
+            yr, mon, strike, ot = m.groups()
+            mo = MONTH_ABB.get(mon)
+            if mo:
+                try: return _date(2000+int(yr), mo, 1), int(strike), ot
+                except: pass
+        # Weekly
+        m = re.match(r"^(\d{2})(\d)(\d{2})(\d+)(CE|PE)$", s)
+        if m:
+            yr, mo, dy, strike, ot = m.groups()
+            try: return _date(2000+int(yr), int(mo), int(dy)), int(strike), ot
+            except: pass
+        return None, None, None
+
+    def compute_chain(calls, puts):
+        """Compute PCR, max pain, top CE/PE from {strike: {oi,vol,ltp}} dicts."""
+        total_ce = sum(v["oi"] for v in calls.values())
+        total_pe = sum(v["oi"] for v in puts.values())
+        pcr = round(total_pe / total_ce, 3) if total_ce > 0 else None
+
+        all_s = sorted(set(list(calls) + list(puts)))
+        mp_val, mp_strike = float("inf"), None
+        for s in all_s:
+            loss = (sum(max(s-k,0)*v["oi"] for k,v in calls.items()) +
+                    sum(max(k-s,0)*v["oi"] for k,v in puts.items()))
+            if loss < mp_val:
+                mp_val, mp_strike = loss, s
+
+        top_ce = sorted(calls.items(), key=lambda x: x[1]["oi"], reverse=True)[:3]
+        top_pe = sorted(puts.items(),  key=lambda x: x[1]["oi"], reverse=True)[:3]
+
+        if   pcr is None:  signal, pcr_text = "HOLD", "n/a"
+        elif pcr >= 1.5:   signal, pcr_text = "BUY",  f"{pcr} — Strong support (high PE OI)"
+        elif pcr >= 1.1:   signal, pcr_text = "BUY",  f"{pcr} — Moderate support"
+        elif pcr <= 0.6:   signal, pcr_text = "SELL", f"{pcr} — Strong resistance (high CE OI)"
+        elif pcr <= 0.9:   signal, pcr_text = "SELL", f"{pcr} — Moderate resistance"
+        else:              signal, pcr_text = "HOLD", f"{pcr} — Neutral"
+
+        return {
+            "signal": signal, "pcr": pcr, "pcr_text": pcr_text,
+            "total_call_oi": total_ce, "total_put_oi": total_pe,
+            "max_pain": mp_strike,
+            "ce_resistance": [{"strike":k,"oi":v["oi"],"vol":v["vol"],"ltp":v["ltp"]} for k,v in top_ce],
+            "pe_support":    [{"strike":k,"oi":v["oi"],"vol":v["vol"],"ltp":v["ltp"]} for k,v in top_pe],
+        }
+
+    def analyse_index(underlying, display_name):
         try:
-            data    = nse_fetch(symbol)
-            records = data["records"]
-            spot    = round(float(records["underlyingValue"]), 2)
-            expiries= records["expiryDates"]          # e.g. "24-Apr-2025"
-            rows    = records["data"]
+            # Spot price via yfinance (works fine from Vercel)
+            yf_sym = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK"}[underlying]
+            h = yf.Ticker(yf_sym).history(period="1d")
+            spot = round(float(h["Close"].iloc[-1]), 2) if not h.empty else 0
+
+            # All option instruments from Angel One
+            search = obj.searchScrip(exchange="NFO", searchscrip=underlying)
+            instruments = search.get("data") or []
 
             today = _date.today()
+            options = []
+            for inst in instruments:
+                sym   = inst.get("tradingsymbol", "")
+                token = inst.get("symboltoken",   "")
+                exp, strike, ot = parse_symbol(sym, underlying)
+                if exp and strike and ot and exp >= today and token:
+                    options.append({"token": token, "expiry": exp,
+                                    "strike": strike, "opt_type": ot})
 
-            # Find nearest weekly and monthly expiry
-            def parse_exp(s):
-                for fmt in ("%d-%b-%Y", "%d-%B-%Y"):
-                    try: return datetime.strptime(s, fmt).date()
-                    except ValueError: pass
-                return None
+            if not options:
+                return {"error": "No option instruments returned by Angel One", "spot": spot}
 
-            weekly_exp = monthly_exp = None
-            for e in expiries:
-                ed = parse_exp(e)
-                if ed is None: continue
-                if ed >= today and weekly_exp is None:
-                    weekly_exp = e
-                if ed.month == today.month and ed >= today and monthly_exp is None:
-                    monthly_exp = e
+            expiries = sorted(set(o["expiry"] for o in options))
+            today_month = today.month
 
-            def analyse_expiry(exp_str):
+            # nearest expiry = weekly, nearest within current month = monthly
+            weekly_exp  = expiries[0]
+            monthly_exp = next((e for e in expiries if e.month == today_month), weekly_exp)
+
+            def fetch_expiry(exp_date):
+                exp_opts = [o for o in options if o["expiry"] == exp_date]
+                # Only ATM ±15% strikes to stay within batch limit
+                atm = [o for o in exp_opts if spot * 0.85 <= o["strike"] <= spot * 1.15] or exp_opts[:80]
+
+                # Batch market data (max 50 tokens per call)
+                token_oi = {}
+                for i in range(0, len(atm), 50):
+                    batch   = atm[i:i+50]
+                    req     = {"mode": "FULL", "exchangeTokens": {"NFO": [o["token"] for o in batch]}}
+                    resp    = obj.getMarketData(req)
+                    fetched = (resp.get("data") or {}).get("fetched") or []
+                    for f in fetched:
+                        token_oi[str(f.get("symbolToken",""))] = {
+                            "oi":  int(f.get("opnInterest",  0) or 0),
+                            "vol": int(f.get("tradeVolume",  0) or 0),
+                            "ltp": float(f.get("ltp",        0) or 0),
+                        }
+
                 calls, puts = {}, {}
-                for row in rows:
-                    if row.get("expiryDate") != exp_str:
-                        continue
-                    strike = int(row["strikePrice"])
-                    if "CE" in row and row["CE"]:
-                        calls[strike] = {
-                            "oi":  int(row["CE"].get("openInterest", 0) or 0),
-                            "vol": int(row["CE"].get("totalTradedVolume", 0) or 0),
-                            "ltp": float(row["CE"].get("lastPrice", 0) or 0),
-                        }
-                    if "PE" in row and row["PE"]:
-                        puts[strike] = {
-                            "oi":  int(row["PE"].get("openInterest", 0) or 0),
-                            "vol": int(row["PE"].get("totalTradedVolume", 0) or 0),
-                            "ltp": float(row["PE"].get("lastPrice", 0) or 0),
-                        }
+                for o in atm:
+                    td = token_oi.get(o["token"], {"oi":0,"vol":0,"ltp":0})
+                    if o["opt_type"] == "CE": calls[o["strike"]] = td
+                    else:                     puts[o["strike"]]  = td
 
-                if not calls and not puts:
-                    return {"error": "No data for this expiry"}
-
-                total_ce_oi = sum(v["oi"] for v in calls.values())
-                total_pe_oi = sum(v["oi"] for v in puts.values())
-                pcr = round(total_pe_oi / total_ce_oi, 3) if total_ce_oi > 0 else None
-
-                # Max pain
-                all_strikes  = sorted(set(list(calls.keys()) + list(puts.keys())))
-                mp_val, mp_strike = float("inf"), None
-                for s in all_strikes:
-                    ce_loss = sum(max(s - k, 0) * v["oi"] for k, v in calls.items())
-                    pe_loss = sum(max(k - s, 0) * v["oi"] for k, v in puts.items())
-                    total   = ce_loss + pe_loss
-                    if total < mp_val:
-                        mp_val, mp_strike = total, s
-
-                # Top 3 CE and PE by OI
-                top_ce = sorted(calls.items(), key=lambda x: x[1]["oi"], reverse=True)[:3]
-                top_pe = sorted(puts.items(),  key=lambda x: x[1]["oi"], reverse=True)[:3]
-
-                # Signal
-                if pcr is None:      signal = "HOLD"
-                elif pcr >= 1.5:     signal = "BUY"
-                elif pcr >= 1.1:     signal = "BUY"
-                elif pcr <= 0.6:     signal = "SELL"
-                elif pcr <= 0.9:     signal = "SELL"
-                else:                signal = "HOLD"
-
-                if pcr is None:      pcr_text = "n/a"
-                elif pcr >= 1.5:     pcr_text = f"{pcr} — Strong support (high PE OI)"
-                elif pcr >= 1.1:     pcr_text = f"{pcr} — Moderate support"
-                elif pcr <= 0.6:     pcr_text = f"{pcr} — Strong resistance (high CE OI)"
-                elif pcr <= 0.9:     pcr_text = f"{pcr} — Moderate resistance"
-                else:                pcr_text = f"{pcr} — Neutral"
-
-                return {
-                    "expiry":        exp_str,
-                    "signal":        signal,
-                    "pcr":           pcr,
-                    "pcr_text":      pcr_text,
-                    "total_call_oi": total_ce_oi,
-                    "total_put_oi":  total_pe_oi,
-                    "max_pain":      mp_strike,
-                    "ce_resistance": [{"strike": k, "oi": v["oi"], "vol": v["vol"], "ltp": v["ltp"]} for k, v in top_ce],
-                    "pe_support":    [{"strike": k, "oi": v["oi"], "vol": v["vol"], "ltp": v["ltp"]} for k, v in top_pe],
-                }
+                result = compute_chain(calls, puts)
+                result["expiry"] = str(exp_date)
+                return result
 
             out = {"spot": spot, "name": display_name}
-            if weekly_exp:
-                try:    out["weekly"]  = analyse_expiry(weekly_exp)
-                except Exception as e: out["weekly"]  = {"error": str(e)}
-            if monthly_exp and monthly_exp != weekly_exp:
-                try:    out["monthly"] = analyse_expiry(monthly_exp)
+            try:    out["weekly"]  = fetch_expiry(weekly_exp)
+            except Exception as e: out["weekly"] = {"error": str(e)}
+
+            if monthly_exp != weekly_exp:
+                try:    out["monthly"] = fetch_expiry(monthly_exp)
                 except Exception as e: out["monthly"] = {"error": str(e)}
-            elif monthly_exp == weekly_exp and weekly_exp:
-                out["monthly"] = out.get("weekly")   # same expiry = weekly is already the monthly
+            else:
+                out["monthly"] = out["weekly"]
+
             return out
         except Exception as e:
             return {"error": str(e)}
 
     return jsonify(sanitize({
-        "NIFTY":     analyse("NIFTY",     "Nifty 50"),
-        "BANKNIFTY": analyse("BANKNIFTY", "Bank Nifty"),
+        "NIFTY":     analyse_index("NIFTY",     "Nifty 50"),
+        "BANKNIFTY": analyse_index("BANKNIFTY", "Bank Nifty"),
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }))
 
