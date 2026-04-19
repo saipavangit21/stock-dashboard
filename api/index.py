@@ -922,6 +922,118 @@ def api_analyze():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/options")
+def api_options():
+    """
+    NIFTY and Bank NIFTY options chain analysis.
+    Returns PCR, max pain, top CE/PE OI strikes, and BUY/SELL signal
+    for the nearest weekly (day) and monthly expiry.
+    """
+    from datetime import date as _date
+
+    def analyse_chain(ticker, name):
+        try:
+            tk   = yf.Ticker(ticker)
+            hist = tk.history(period="1d")
+            if hist.empty:
+                return {"error": "No spot data"}
+            spot = round(float(hist["Close"].iloc[-1]), 2)
+            exps = tk.options
+            if not exps:
+                return {"error": "No options data available"}
+
+            today      = _date.today()
+            weekly_exp = None
+            monthly_exp= None
+
+            for e in exps:
+                try:
+                    edate = datetime.strptime(e, "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                days = (edate - today).days
+                if days >= 0 and weekly_exp is None:
+                    weekly_exp = e           # nearest available expiry (weekly/daily)
+                if edate.month == today.month and monthly_exp is None:
+                    monthly_exp = e          # first expiry in current month
+
+            def analyse_expiry(exp_date_str):
+                chain = tk.option_chain(exp_date_str)
+                calls = chain.calls.copy()
+                puts  = chain.puts.copy()
+
+                for df in (calls, puts):
+                    df["openInterest"] = df["openInterest"].fillna(0).astype(int)
+                    df["volume"]       = df["volume"].fillna(0).astype(int)
+
+                total_call_oi = int(calls["openInterest"].sum())
+                total_put_oi  = int(puts["openInterest"].sum())
+                pcr = round(total_put_oi / total_call_oi, 3) if total_call_oi > 0 else None
+
+                # Max pain — strike where option-buyer total loss is maximum
+                strikes = sorted(set(list(calls["strike"].values) + list(puts["strike"].values)))
+                max_pain_val, max_pain_strike = float("inf"), None
+                # (standard: total intrinsic value of all options at each hypothetical expiry price)
+                for s in strikes:
+                    call_loss = float(((s - calls["strike"]).clip(lower=0) * calls["openInterest"]).sum())
+                    put_loss  = float(((puts["strike"] - s).clip(lower=0)  * puts["openInterest"]).sum())
+                    total     = call_loss + put_loss
+                    if total < max_pain_val:
+                        max_pain_val    = total
+                        max_pain_strike = s
+
+                # Top 3 CE strikes by OI (resistance levels)
+                top_ce = calls.nlargest(3, "openInterest")[["strike","openInterest","volume"]].to_dict("records")
+                # Top 3 PE strikes by OI (support levels)
+                top_pe = puts.nlargest(3,  "openInterest")[["strike","openInterest","volume"]].to_dict("records")
+
+                # Signal from PCR
+                if pcr is None:
+                    signal = "HOLD"
+                elif pcr >= 1.5:  signal = "BUY"   # extreme put OI = strong support / trapped bears
+                elif pcr >= 1.1:  signal = "BUY"
+                elif pcr <= 0.6:  signal = "SELL"  # extreme call OI = resistance / complacency
+                elif pcr <= 0.9:  signal = "SELL"
+                else:             signal = "HOLD"
+
+                # PCR interpretation text
+                if pcr is None:       pcr_text = "n/a"
+                elif pcr >= 1.5:      pcr_text = f"{pcr} — Strong support (high put OI)"
+                elif pcr >= 1.1:      pcr_text = f"{pcr} — Moderate support"
+                elif pcr <= 0.6:      pcr_text = f"{pcr} — Strong resistance (high call OI)"
+                elif pcr <= 0.9:      pcr_text = f"{pcr} — Moderate resistance"
+                else:                 pcr_text = f"{pcr} — Neutral"
+
+                return {
+                    "expiry":         exp_date_str,
+                    "signal":         signal,
+                    "pcr":            pcr,
+                    "pcr_text":       pcr_text,
+                    "total_call_oi":  total_call_oi,
+                    "total_put_oi":   total_put_oi,
+                    "max_pain":       round(float(max_pain_strike), 0) if max_pain_strike else None,
+                    "ce_resistance":  [{"strike": int(r["strike"]), "oi": int(r["openInterest"]), "vol": int(r["volume"])} for r in top_ce],
+                    "pe_support":     [{"strike": int(r["strike"]), "oi": int(r["openInterest"]), "vol": int(r["volume"])} for r in top_pe],
+                }
+
+            out = {"spot": spot, "name": name, "ticker": ticker}
+            if weekly_exp:
+                try:    out["weekly"]  = analyse_expiry(weekly_exp)
+                except Exception as e: out["weekly"] = {"error": str(e)}
+            if monthly_exp and monthly_exp != weekly_exp:
+                try:    out["monthly"] = analyse_expiry(monthly_exp)
+                except Exception as e: out["monthly"] = {"error": str(e)}
+            return out
+        except Exception as e:
+            return {"error": str(e)}
+
+    return jsonify(sanitize({
+        "NIFTY":     analyse_chain("^NSEI",    "Nifty 50"),
+        "BANKNIFTY": analyse_chain("^NSEBANK", "Bank Nifty"),
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }))
+
+
 @app.route("/")
 def dashboard():
     return render_template_string(HTML_TEMPLATE, stocks=STOCKS)
@@ -1126,6 +1238,7 @@ header h1 span{color:var(--accent);}
   <div class="hdr-btns">
     <button class="hdr-btn" onclick="showScan('market')">Market Scan</button>
     <button class="hdr-btn" onclick="showScan('penny')">Penny Scan</button>
+    <button class="hdr-btn" onclick="showOptions()">India Options</button>
     <button class="hdr-btn" onclick="document.getElementById('guide-overlay').style.display='block'">Signal Guide</button>
   </div>
 </header>
@@ -1212,6 +1325,19 @@ header h1 span{color:var(--accent);}
     <div id="regime-india-banner"></div>
     <div id="scan-loading" class="scan-loading"><div class="spin"></div><div>Scanning…</div></div>
     <div id="scan-cards"></div>
+  </div>
+</div>
+
+<!-- India Options overlay -->
+<div id="options-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:150;overflow-y:auto;padding:2rem;">
+  <div style="max-width:960px;margin:0 auto;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:1.5rem;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.2rem;">
+      <h2 style="font-size:1.1rem;font-weight:800;">India Options — NIFTY &amp; Bank Nifty</h2>
+      <button onclick="document.getElementById('options-overlay').style.display='none'" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:1.5rem;">&#x2715;</button>
+    </div>
+    <div id="options-loading" style="text-align:center;padding:2rem;color:var(--muted);"><div class="spin"></div><div>Loading options data…</div></div>
+    <div id="options-content" style="display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;"></div>
+    <p style="margin-top:1rem;font-size:.72rem;color:var(--muted);">PCR = Put/Call Ratio · Max Pain = strike where option buyers lose most at expiry · OI = Open Interest</p>
   </div>
 </div>
 
@@ -1569,6 +1695,76 @@ function renderPenny(data) {
   meta.textContent   = `Scanned ${data.scanned||0} penny stocks · ${new Date(data.generated_at).toLocaleTimeString()}`;
   document.getElementById("scan-cards").appendChild(meta);
 }
+
+// ── India Options ─────────────────────────────────────────────
+function showOptions() {
+  document.getElementById("options-overlay").style.display = "block";
+  document.getElementById("options-loading").style.display = "block";
+  document.getElementById("options-content").innerHTML     = "";
+  fetch("/api/options")
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById("options-loading").style.display = "none";
+      let html = "";
+      for (const key of ["NIFTY","BANKNIFTY"]) {
+        const d = data[key];
+        if (!d || d.error) {
+          html += `<div class="card"><div class="card-title">${key}</div><span style="color:var(--muted)">${d?.error||"No data"}</span></div>`;
+          continue;
+        }
+        html += `<div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem;">
+            <div class="card-title" style="margin:0;">${d.name||key}</div>
+            <div style="font-size:1rem;font-weight:800;">&#8377;${(d.spot||0).toLocaleString()}</div>
+          </div>`;
+        for (const [label, exp] of [["Weekly (Day)", d.weekly], ["Monthly", d.monthly]]) {
+          if (!exp) continue;
+          if (exp.error) { html += `<div style="color:var(--muted);font-size:.8rem;margin-bottom:.8rem;">${label}: ${exp.error}</div>`; continue; }
+          const sc = exp.signal === "BUY" ? "var(--up)" : exp.signal === "SELL" ? "var(--down)" : "var(--neutral)";
+          const bg = exp.signal === "BUY" ? "rgba(34,197,94,.12)" : exp.signal === "SELL" ? "rgba(239,68,68,.12)" : "rgba(245,158,11,.12)";
+          html += `<div style="background:${bg};border-radius:10px;padding:.7rem .9rem;margin-bottom:.8rem;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem;">
+              <span style="font-size:.75rem;font-weight:700;text-transform:uppercase;color:var(--muted);">${label} · ${exp.expiry}</span>
+              <span style="font-weight:800;color:${sc};font-size:.95rem;">${exp.signal}</span>
+            </div>
+            <div style="font-size:.8rem;display:grid;grid-template-columns:1fr 1fr;gap:.3rem .8rem;margin-bottom:.5rem;">
+              <span style="color:var(--muted);">PCR</span><span style="font-weight:700;">${exp.pcr_text||exp.pcr||"—"}</span>
+              <span style="color:var(--muted);">Max Pain</span><span style="font-weight:700;">${exp.max_pain ? "&#8377;"+exp.max_pain.toLocaleString() : "—"}</span>
+              <span style="color:var(--muted);">Total CE OI</span><span>${(exp.total_call_oi||0).toLocaleString()}</span>
+              <span style="color:var(--muted);">Total PE OI</span><span>${(exp.total_put_oi||0).toLocaleString()}</span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;">
+              <div>
+                <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;color:var(--down);margin-bottom:.25rem;">CE Resistance (Calls)</div>
+                ${(exp.ce_resistance||[]).map(r=>`<div style="display:flex;justify-content:space-between;background:rgba(239,68,68,.08);border-radius:5px;padding:.2rem .4rem;margin-bottom:.2rem;font-size:.78rem;">
+                  <span style="font-weight:700;">&#8377;${r.strike.toLocaleString()}</span>
+                  <span style="color:var(--muted);">OI ${(r.oi/1e5).toFixed(1)}L</span>
+                </div>`).join("")}
+              </div>
+              <div>
+                <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;color:var(--up);margin-bottom:.25rem;">PE Support (Puts)</div>
+                ${(exp.pe_support||[]).map(r=>`<div style="display:flex;justify-content:space-between;background:rgba(34,197,94,.08);border-radius:5px;padding:.2rem .4rem;margin-bottom:.2rem;font-size:.78rem;">
+                  <span style="font-weight:700;">&#8377;${r.strike.toLocaleString()}</span>
+                  <span style="color:var(--muted);">OI ${(r.oi/1e5).toFixed(1)}L</span>
+                </div>`).join("")}
+              </div>
+            </div>
+          </div>`;
+        }
+        html += `</div>`;
+      }
+      document.getElementById("options-content").innerHTML = html;
+      const meta = document.createElement("div");
+      meta.style.cssText = "grid-column:1/-1;font-size:.72rem;color:var(--muted);text-align:center;margin-top:.4rem;";
+      meta.textContent = `Updated ${new Date(data.generated_at).toLocaleTimeString()}`;
+      document.getElementById("options-content").appendChild(meta);
+    })
+    .catch(e => {
+      document.getElementById("options-loading").innerHTML =
+        `<span style="color:var(--down)">Failed: ${e.message}</span>`;
+    });
+}
+document.getElementById("options-overlay").addEventListener("click", function(e){ if(e.target===this) this.style.display="none"; });
 
 // Init
 renderSidebar("us","");
