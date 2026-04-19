@@ -26,10 +26,12 @@ import threading
 app = Flask(__name__)
 
 # ── Global model cache ─────────────────────────────────────────────────────────
-# Persists across warm Lambda invocations so we don't retrain on every request.
 _cache      = {}
-_cache_date = {}   # tracks which date each ticker was last trained
+_cache_date = {}
 _lock       = threading.Lock()
+
+# ── Zerodha Kite session (persists across warm invocations) ────────────────────
+_kite_access_token = None
 
 STOCKS     = ["AAPL", "MSFT", "TSLA", "NVDA", "^NSEI", "BDMD"]
 START_DATE = "2022-01-01"   # 2 years keeps training fast for serverless
@@ -922,71 +924,68 @@ def api_analyze():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/kite-login")
+def kite_login():
+    """Redirect user to Zerodha OAuth login page."""
+    import os
+    from kiteconnect import KiteConnect
+    api_key = os.environ.get("KITE_API_KEY", "")
+    if not api_key:
+        return "KITE_API_KEY not set in Vercel env vars.", 503
+    kite = KiteConnect(api_key=api_key)
+    return __import__("flask").redirect(kite.login_url())
+
+
+@app.route("/api/kite-callback")
+def kite_callback():
+    """Exchange Zerodha request_token for access_token and store in memory."""
+    import os
+    from kiteconnect import KiteConnect
+    global _kite_access_token
+
+    api_key    = os.environ.get("KITE_API_KEY",    "")
+    api_secret = os.environ.get("KITE_API_SECRET", "")
+    req_token  = request.args.get("request_token", "")
+    status     = request.args.get("status", "")
+
+    if status != "success" or not req_token:
+        return "Login failed or cancelled.", 400
+
+    try:
+        kite = KiteConnect(api_key=api_key)
+        data = kite.generate_session(req_token, api_secret=api_secret)
+        _kite_access_token = data["access_token"]
+        return __import__("flask").redirect("/?options=1")
+    except Exception as e:
+        return f"Token exchange failed: {e}", 500
+
+
 @app.route("/api/options")
 def api_options():
     """
-    NIFTY and Bank NIFTY options chain via Angel One SmartAPI.
-    Requires env vars: ANGEL_API_KEY, ANGEL_CLIENT_CODE, ANGEL_PASSWORD, ANGEL_TOTP_SECRET
-    Register free at: smartapi.angelbroking.com
+    NIFTY / BankNifty options chain via Zerodha Kite Connect.
+    Access token is obtained via /api/kite-login OAuth flow and stored in memory.
+    Env vars needed: KITE_API_KEY, KITE_API_SECRET (permanent, set once in Vercel).
     """
-    import os, re, pyotp
+    import os
     from datetime import date as _date
-    from SmartApi import SmartConnect
+    from kiteconnect import KiteConnect
 
-    api_key     = os.environ.get("ANGEL_API_KEY",     "")
-    client_code = os.environ.get("ANGEL_CLIENT_CODE", "")
-    password    = os.environ.get("ANGEL_PASSWORD",    "")
-    totp_secret = os.environ.get("ANGEL_TOTP_SECRET", "")
+    global _kite_access_token
 
-    NOT_CONFIGURED = {
-        "NIFTY":     {"error": "Angel One SmartAPI not configured. Add ANGEL_API_KEY, ANGEL_CLIENT_CODE, ANGEL_PASSWORD, ANGEL_TOTP_SECRET to Vercel env vars. Free signup: smartapi.angelbroking.com"},
-        "BANKNIFTY": {"error": "Same — see NIFTY message above"},
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-    }
+    api_key = os.environ.get("KITE_API_KEY", "")
+    if not api_key:
+        return jsonify({"needs_auth": True, "login_url": "/api/kite-login",
+                        "error": "KITE_API_KEY not set in Vercel env vars"})
 
-    if not all([api_key, client_code, password, totp_secret]):
-        return jsonify(NOT_CONFIGURED)
+    if not _kite_access_token:
+        return jsonify({"needs_auth": True, "login_url": "/api/kite-login",
+                        "error": "Not authenticated — click Connect Zerodha"})
 
-    # ── Authenticate ────────────────────────────────────────────
-    try:
-        obj    = SmartConnect(api_key=api_key)
-        totp   = pyotp.TOTP(totp_secret).now()
-        sess   = obj.generateSession(client_code, password, totp)
-        if not sess.get("status"):
-            raise ValueError(sess.get("message", "Auth failed"))
-    except Exception as e:
-        err = str(e)
-        return jsonify({"NIFTY": {"error": err}, "BANKNIFTY": {"error": err},
-                        "generated_at": datetime.utcnow().isoformat() + "Z"})
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(_kite_access_token)
 
-    MONTH_ABB = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
-                 "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
-
-    def parse_symbol(sym, ul):
-        """
-        Parse NSE F&O option symbol into (expiry_date, strike, opt_type).
-        Monthly: NIFTY25APR23000CE  → year=25, mon=APR
-        Weekly:  NIFTY2541923000CE  → year=25, month=4, day=19
-        """
-        s = sym.upper().replace(ul.upper(), "", 1)
-        # Monthly
-        m = re.match(r"^(\d{2})([A-Z]{3})(\d+)(CE|PE)$", s)
-        if m:
-            yr, mon, strike, ot = m.groups()
-            mo = MONTH_ABB.get(mon)
-            if mo:
-                try: return _date(2000+int(yr), mo, 1), int(strike), ot
-                except: pass
-        # Weekly
-        m = re.match(r"^(\d{2})(\d)(\d{2})(\d+)(CE|PE)$", s)
-        if m:
-            yr, mo, dy, strike, ot = m.groups()
-            try: return _date(2000+int(yr), int(mo), int(dy)), int(strike), ot
-            except: pass
-        return None, None, None
-
-    def compute_chain(calls, puts):
-        """Compute PCR, max pain, top CE/PE from {strike: {oi,vol,ltp}} dicts."""
+    def compute_chain(calls, puts, expiry_str):
         total_ce = sum(v["oi"] for v in calls.values())
         total_pe = sum(v["oi"] for v in puts.values())
         pcr = round(total_pe / total_ce, 3) if total_ce > 0 else None
@@ -994,8 +993,8 @@ def api_options():
         all_s = sorted(set(list(calls) + list(puts)))
         mp_val, mp_strike = float("inf"), None
         for s in all_s:
-            loss = (sum(max(s-k,0)*v["oi"] for k,v in calls.items()) +
-                    sum(max(k-s,0)*v["oi"] for k,v in puts.items()))
+            loss = (sum(max(s - k, 0) * v["oi"] for k, v in calls.items()) +
+                    sum(max(k - s, 0) * v["oi"] for k, v in puts.items()))
             if loss < mp_val:
                 mp_val, mp_strike = loss, s
 
@@ -1010,72 +1009,65 @@ def api_options():
         else:              signal, pcr_text = "HOLD", f"{pcr} — Neutral"
 
         return {
-            "signal": signal, "pcr": pcr, "pcr_text": pcr_text,
-            "total_call_oi": total_ce, "total_put_oi": total_pe,
-            "max_pain": mp_strike,
+            "expiry": expiry_str, "signal": signal, "pcr": pcr, "pcr_text": pcr_text,
+            "total_call_oi": total_ce, "total_put_oi": total_pe, "max_pain": mp_strike,
             "ce_resistance": [{"strike":k,"oi":v["oi"],"vol":v["vol"],"ltp":v["ltp"]} for k,v in top_ce],
             "pe_support":    [{"strike":k,"oi":v["oi"],"vol":v["vol"],"ltp":v["ltp"]} for k,v in top_pe],
         }
 
-    def analyse_index(underlying, display_name):
+    def analyse_index(nse_symbol, kite_symbol, display_name):
+        """
+        nse_symbol  = 'NIFTY' or 'BANKNIFTY'
+        kite_symbol = 'NSE:NIFTY 50' or 'NSE:NIFTY BANK'
+        """
         try:
-            # Spot price via yfinance (works fine from Vercel)
-            yf_sym = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK"}[underlying]
-            h = yf.Ticker(yf_sym).history(period="1d")
-            spot = round(float(h["Close"].iloc[-1]), 2) if not h.empty else 0
+            # Spot price
+            q = kite.quote([kite_symbol])
+            spot = round(float(q[kite_symbol]["last_price"]), 2)
 
-            # All option instruments from Angel One
-            search = obj.searchScrip(exchange="NFO", searchscrip=underlying)
-            instruments = search.get("data") or []
-
+            # NFO instruments — fetch once, filter locally
+            instruments = kite.instruments("NFO")
             today = _date.today()
-            options = []
-            for inst in instruments:
-                sym   = inst.get("tradingsymbol", "")
-                token = inst.get("symboltoken",   "")
-                exp, strike, ot = parse_symbol(sym, underlying)
-                if exp and strike and ot and exp >= today and token:
-                    options.append({"token": token, "expiry": exp,
-                                    "strike": strike, "opt_type": ot})
 
-            if not options:
-                return {"error": "No option instruments returned by Angel One", "spot": spot}
+            # Keep only options for this underlying
+            opts = [i for i in instruments
+                    if i["name"] == nse_symbol
+                    and i["instrument_type"] in ("CE", "PE")
+                    and i["expiry"] >= today]
 
-            expiries = sorted(set(o["expiry"] for o in options))
-            today_month = today.month
+            if not opts:
+                return {"error": f"No {nse_symbol} options found in NFO instruments", "spot": spot}
 
-            # nearest expiry = weekly, nearest within current month = monthly
+            expiries = sorted(set(o["expiry"] for o in opts))
             weekly_exp  = expiries[0]
-            monthly_exp = next((e for e in expiries if e.month == today_month), weekly_exp)
+            monthly_exp = next((e for e in expiries if e.month == today.month), weekly_exp)
 
             def fetch_expiry(exp_date):
-                exp_opts = [o for o in options if o["expiry"] == exp_date]
-                # Only ATM ±15% strikes to stay within batch limit
-                atm = [o for o in exp_opts if spot * 0.85 <= o["strike"] <= spot * 1.15] or exp_opts[:80]
+                exp_opts = [o for o in opts if o["expiry"] == exp_date
+                            and spot * 0.85 <= o["strike"] <= spot * 1.15]
+                if not exp_opts:
+                    exp_opts = [o for o in opts if o["expiry"] == exp_date][:80]
 
-                # Batch market data (max 50 tokens per call)
-                token_oi = {}
-                for i in range(0, len(atm), 50):
-                    batch   = atm[i:i+50]
-                    req     = {"mode": "FULL", "exchangeTokens": {"NFO": [o["token"] for o in batch]}}
-                    resp    = obj.getMarketData(req)
-                    fetched = (resp.get("data") or {}).get("fetched") or []
-                    for f in fetched:
-                        token_oi[str(f.get("symbolToken",""))] = {
-                            "oi":  int(f.get("opnInterest",  0) or 0),
-                            "vol": int(f.get("tradeVolume",  0) or 0),
-                            "ltp": float(f.get("ltp",        0) or 0),
-                        }
+                # Batch quote (Kite allows ~500 per call; use NFO:SYMBOL format)
+                inst_keys = [f"NFO:{o['tradingsymbol']}" for o in exp_opts]
+                quotes = {}
+                for i in range(0, len(inst_keys), 500):
+                    quotes.update(kite.quote(inst_keys[i:i+500]))
 
                 calls, puts = {}, {}
-                for o in atm:
-                    td = token_oi.get(o["token"], {"oi":0,"vol":0,"ltp":0})
-                    if o["opt_type"] == "CE": calls[o["strike"]] = td
-                    else:                     puts[o["strike"]]  = td
+                for o in exp_opts:
+                    key = f"NFO:{o['tradingsymbol']}"
+                    q   = quotes.get(key, {})
+                    oi  = int(q.get("oi", 0) or 0)
+                    vol = int(q.get("volume", 0) or 0)
+                    ltp = float(q.get("last_price", 0) or 0)
+                    td  = {"oi": oi, "vol": vol, "ltp": ltp}
+                    if o["instrument_type"] == "CE":
+                        calls[int(o["strike"])] = td
+                    else:
+                        puts[int(o["strike"])]  = td
 
-                result = compute_chain(calls, puts)
-                result["expiry"] = str(exp_date)
-                return result
+                return compute_chain(calls, puts, str(exp_date))
 
             out = {"spot": spot, "name": display_name}
             try:    out["weekly"]  = fetch_expiry(weekly_exp)
@@ -1089,11 +1081,15 @@ def api_options():
 
             return out
         except Exception as e:
+            # Token may have expired — clear so UI shows login button again
+            if "token" in str(e).lower() or "403" in str(e):
+                global _kite_access_token
+                _kite_access_token = None
             return {"error": str(e)}
 
     return jsonify(sanitize({
-        "NIFTY":     analyse_index("NIFTY",     "Nifty 50"),
-        "BANKNIFTY": analyse_index("BANKNIFTY", "Bank Nifty"),
+        "NIFTY":     analyse_index("NIFTY",     "NSE:NIFTY 50",   "Nifty 50"),
+        "BANKNIFTY": analyse_index("BANKNIFTY", "NSE:NIFTY BANK", "Bank Nifty"),
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }))
 
@@ -1769,6 +1765,16 @@ function showOptions() {
     .then(r => r.json())
     .then(data => {
       document.getElementById("options-loading").style.display = "none";
+      if (data.needs_auth) {
+        document.getElementById("options-content").innerHTML =
+          `<div style="grid-column:1/-1;text-align:center;padding:2rem;">
+            <div style="font-size:1rem;color:var(--muted);margin-bottom:1.2rem;">${data.error || "Connect your Zerodha account to view live options data."}</div>
+            <a href="/api/kite-login" style="display:inline-block;background:var(--accent);color:#fff;padding:.7rem 1.8rem;border-radius:10px;font-weight:700;font-size:.95rem;text-decoration:none;">
+              Connect Zerodha (Kite)
+            </a>
+          </div>`;
+        return;
+      }
       let html = "";
       for (const key of ["NIFTY","BANKNIFTY"]) {
         const d = data[key];
@@ -1829,6 +1835,12 @@ function showOptions() {
     });
 }
 document.getElementById("options-overlay").addEventListener("click", function(e){ if(e.target===this) this.style.display="none"; });
+
+// Auto-open options overlay after Zerodha OAuth redirect
+if (new URLSearchParams(window.location.search).get("options") === "1") {
+  history.replaceState({}, "", "/");
+  showOptions();
+}
 
 // Init
 renderSidebar("us","");
