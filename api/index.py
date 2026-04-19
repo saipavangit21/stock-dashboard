@@ -941,11 +941,18 @@ def api_options():
     def nse_fetch(symbol):
         """Fetch NSE option chain. Must warm up a session first to get cookies."""
         session = _req.Session()
+        # warm-up: get cookies from the main page
         session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=10)
+        # also hit the option-chain page to seed any additional cookies
+        session.get("https://www.nseindia.com/option-chain", headers=NSE_HEADERS, timeout=10)
         url  = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-        resp = session.get(url, headers=NSE_HEADERS, timeout=10)
+        resp = session.get(url, headers=NSE_HEADERS, timeout=15)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        # expose top-level keys in error if structure unexpected
+        if "records" not in data:
+            raise ValueError(f"Unexpected NSE response keys: {list(data.keys())[:5]} | status: {resp.status_code}")
+        return data
 
     def analyse(symbol, display_name):
         try:
