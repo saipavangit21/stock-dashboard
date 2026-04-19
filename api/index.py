@@ -925,31 +925,20 @@ def api_analyze():
 @app.route("/api/options")
 def api_options():
     """
-    NIFTY and Bank NIFTY options chain — fetched directly from NSE public API.
-    yfinance does not support Indian index options.
+    NIFTY and Bank NIFTY options chain via nsepython (proxied through Indian IP).
+    Direct NSE API calls are blocked from Vercel/AWS datacenter IPs.
     """
     from datetime import date as _date
 
     def nse_fetch(symbol):
         """
-        Fetch NSE option chain using curl-cffi to impersonate Chrome TLS fingerprint.
-        Plain requests gets blocked by NSE's bot detection even with correct headers.
+        nsepython routes through arthwallet.com proxy (Indian IP) bypassing
+        NSE's block on Vercel/AWS datacenter IPs.
         """
-        try:
-            from curl_cffi import requests as _creq
-            session = _creq.Session(impersonate="chrome120")
-        except ImportError:
-            import requests as _creq
-            session = _creq.Session()
-
-        session.get("https://www.nseindia.com", timeout=10)
-        session.get("https://www.nseindia.com/option-chain", timeout=10)
-        url  = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-        resp = session.get(url, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        if "records" not in data:
-            raise ValueError(f"NSE blocked or changed API. Keys: {list(data.keys())[:8]} | HTTP {resp.status_code}")
+        from nsepython import nse_optionchain_scrapper
+        data = nse_optionchain_scrapper(symbol)
+        if not data or "records" not in data:
+            raise ValueError(f"No data from nsepython for {symbol}. Keys: {list(data.keys()) if data else 'empty'}")
         return data
 
     def analyse(symbol, display_name):
