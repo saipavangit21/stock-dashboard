@@ -932,13 +932,15 @@ def api_options():
 
     def nse_fetch(symbol):
         """
-        nsepython routes through arthwallet.com proxy (Indian IP) bypassing
-        NSE's block on Vercel/AWS datacenter IPs.
+        nsepython.nsefetch() routes through arthwallet.com proxy (Indian IP)
+        to bypass NSE's block on Vercel/AWS datacenter IPs.
         """
-        from nsepython import nse_optionchain_scrapper
-        data = nse_optionchain_scrapper(symbol)
+        from nsepython import nsefetch
+        url  = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+        data = nsefetch(url)
         if not data or "records" not in data:
-            raise ValueError(f"No data from nsepython for {symbol}. Keys: {list(data.keys()) if data else 'empty'}")
+            keys = list(data.keys()) if data else "empty"
+            raise ValueError(f"nsepython proxy returned no usable data for {symbol}. Keys: {keys}")
         return data
 
     def analyse(symbol, display_name):
