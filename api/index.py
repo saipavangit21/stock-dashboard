@@ -928,30 +928,28 @@ def api_options():
     NIFTY and Bank NIFTY options chain — fetched directly from NSE public API.
     yfinance does not support Indian index options.
     """
-    import requests as _req
     from datetime import date as _date
 
-    NSE_HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.nseindia.com/",
-    }
-
     def nse_fetch(symbol):
-        """Fetch NSE option chain. Must warm up a session first to get cookies."""
-        session = _req.Session()
-        # warm-up: get cookies from the main page
-        session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=10)
-        # also hit the option-chain page to seed any additional cookies
-        session.get("https://www.nseindia.com/option-chain", headers=NSE_HEADERS, timeout=10)
+        """
+        Fetch NSE option chain using curl-cffi to impersonate Chrome TLS fingerprint.
+        Plain requests gets blocked by NSE's bot detection even with correct headers.
+        """
+        try:
+            from curl_cffi import requests as _creq
+            session = _creq.Session(impersonate="chrome120")
+        except ImportError:
+            import requests as _creq
+            session = _creq.Session()
+
+        session.get("https://www.nseindia.com", timeout=10)
+        session.get("https://www.nseindia.com/option-chain", timeout=10)
         url  = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-        resp = session.get(url, headers=NSE_HEADERS, timeout=15)
+        resp = session.get(url, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        # expose top-level keys in error if structure unexpected
         if "records" not in data:
-            raise ValueError(f"Unexpected NSE response keys: {list(data.keys())[:5]} | status: {resp.status_code}")
+            raise ValueError(f"NSE blocked or changed API. Keys: {list(data.keys())[:8]} | HTTP {resp.status_code}")
         return data
 
     def analyse(symbol, display_name):
