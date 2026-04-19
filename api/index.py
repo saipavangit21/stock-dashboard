@@ -925,111 +925,137 @@ def api_analyze():
 @app.route("/api/options")
 def api_options():
     """
-    NIFTY and Bank NIFTY options chain analysis.
-    Returns PCR, max pain, top CE/PE OI strikes, and BUY/SELL signal
-    for the nearest weekly (day) and monthly expiry.
+    NIFTY and Bank NIFTY options chain — fetched directly from NSE public API.
+    yfinance does not support Indian index options.
     """
+    import requests as _req
     from datetime import date as _date
 
-    def analyse_chain(ticker, name):
+    NSE_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.nseindia.com/",
+    }
+
+    def nse_fetch(symbol):
+        """Fetch NSE option chain. Must warm up a session first to get cookies."""
+        session = _req.Session()
+        session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=10)
+        url  = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+        resp = session.get(url, headers=NSE_HEADERS, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def analyse(symbol, display_name):
         try:
-            tk   = yf.Ticker(ticker)
-            hist = tk.history(period="1d")
-            if hist.empty:
-                return {"error": "No spot data"}
-            spot = round(float(hist["Close"].iloc[-1]), 2)
-            exps = tk.options
-            if not exps:
-                return {"error": "No options data available"}
+            data    = nse_fetch(symbol)
+            records = data["records"]
+            spot    = round(float(records["underlyingValue"]), 2)
+            expiries= records["expiryDates"]          # e.g. "24-Apr-2025"
+            rows    = records["data"]
 
-            today      = _date.today()
-            weekly_exp = None
-            monthly_exp= None
+            today = _date.today()
 
-            for e in exps:
-                try:
-                    edate = datetime.strptime(e, "%Y-%m-%d").date()
-                except ValueError:
-                    continue
-                days = (edate - today).days
-                if days >= 0 and weekly_exp is None:
-                    weekly_exp = e           # nearest available expiry (weekly/daily)
-                if edate.month == today.month and monthly_exp is None:
-                    monthly_exp = e          # first expiry in current month
+            # Find nearest weekly and monthly expiry
+            def parse_exp(s):
+                for fmt in ("%d-%b-%Y", "%d-%B-%Y"):
+                    try: return datetime.strptime(s, fmt).date()
+                    except ValueError: pass
+                return None
 
-            def analyse_expiry(exp_date_str):
-                chain = tk.option_chain(exp_date_str)
-                calls = chain.calls.copy()
-                puts  = chain.puts.copy()
+            weekly_exp = monthly_exp = None
+            for e in expiries:
+                ed = parse_exp(e)
+                if ed is None: continue
+                if ed >= today and weekly_exp is None:
+                    weekly_exp = e
+                if ed.month == today.month and ed >= today and monthly_exp is None:
+                    monthly_exp = e
 
-                for df in (calls, puts):
-                    df["openInterest"] = df["openInterest"].fillna(0).astype(int)
-                    df["volume"]       = df["volume"].fillna(0).astype(int)
+            def analyse_expiry(exp_str):
+                calls, puts = {}, {}
+                for row in rows:
+                    if row.get("expiryDate") != exp_str:
+                        continue
+                    strike = int(row["strikePrice"])
+                    if "CE" in row and row["CE"]:
+                        calls[strike] = {
+                            "oi":  int(row["CE"].get("openInterest", 0) or 0),
+                            "vol": int(row["CE"].get("totalTradedVolume", 0) or 0),
+                            "ltp": float(row["CE"].get("lastPrice", 0) or 0),
+                        }
+                    if "PE" in row and row["PE"]:
+                        puts[strike] = {
+                            "oi":  int(row["PE"].get("openInterest", 0) or 0),
+                            "vol": int(row["PE"].get("totalTradedVolume", 0) or 0),
+                            "ltp": float(row["PE"].get("lastPrice", 0) or 0),
+                        }
 
-                total_call_oi = int(calls["openInterest"].sum())
-                total_put_oi  = int(puts["openInterest"].sum())
-                pcr = round(total_put_oi / total_call_oi, 3) if total_call_oi > 0 else None
+                if not calls and not puts:
+                    return {"error": "No data for this expiry"}
 
-                # Max pain — strike where option-buyer total loss is maximum
-                strikes = sorted(set(list(calls["strike"].values) + list(puts["strike"].values)))
-                max_pain_val, max_pain_strike = float("inf"), None
-                # (standard: total intrinsic value of all options at each hypothetical expiry price)
-                for s in strikes:
-                    call_loss = float(((s - calls["strike"]).clip(lower=0) * calls["openInterest"]).sum())
-                    put_loss  = float(((puts["strike"] - s).clip(lower=0)  * puts["openInterest"]).sum())
-                    total     = call_loss + put_loss
-                    if total < max_pain_val:
-                        max_pain_val    = total
-                        max_pain_strike = s
+                total_ce_oi = sum(v["oi"] for v in calls.values())
+                total_pe_oi = sum(v["oi"] for v in puts.values())
+                pcr = round(total_pe_oi / total_ce_oi, 3) if total_ce_oi > 0 else None
 
-                # Top 3 CE strikes by OI (resistance levels)
-                top_ce = calls.nlargest(3, "openInterest")[["strike","openInterest","volume"]].to_dict("records")
-                # Top 3 PE strikes by OI (support levels)
-                top_pe = puts.nlargest(3,  "openInterest")[["strike","openInterest","volume"]].to_dict("records")
+                # Max pain
+                all_strikes  = sorted(set(list(calls.keys()) + list(puts.keys())))
+                mp_val, mp_strike = float("inf"), None
+                for s in all_strikes:
+                    ce_loss = sum(max(s - k, 0) * v["oi"] for k, v in calls.items())
+                    pe_loss = sum(max(k - s, 0) * v["oi"] for k, v in puts.items())
+                    total   = ce_loss + pe_loss
+                    if total < mp_val:
+                        mp_val, mp_strike = total, s
 
-                # Signal from PCR
-                if pcr is None:
-                    signal = "HOLD"
-                elif pcr >= 1.5:  signal = "BUY"   # extreme put OI = strong support / trapped bears
-                elif pcr >= 1.1:  signal = "BUY"
-                elif pcr <= 0.6:  signal = "SELL"  # extreme call OI = resistance / complacency
-                elif pcr <= 0.9:  signal = "SELL"
-                else:             signal = "HOLD"
+                # Top 3 CE and PE by OI
+                top_ce = sorted(calls.items(), key=lambda x: x[1]["oi"], reverse=True)[:3]
+                top_pe = sorted(puts.items(),  key=lambda x: x[1]["oi"], reverse=True)[:3]
 
-                # PCR interpretation text
-                if pcr is None:       pcr_text = "n/a"
-                elif pcr >= 1.5:      pcr_text = f"{pcr} — Strong support (high put OI)"
-                elif pcr >= 1.1:      pcr_text = f"{pcr} — Moderate support"
-                elif pcr <= 0.6:      pcr_text = f"{pcr} — Strong resistance (high call OI)"
-                elif pcr <= 0.9:      pcr_text = f"{pcr} — Moderate resistance"
-                else:                 pcr_text = f"{pcr} — Neutral"
+                # Signal
+                if pcr is None:      signal = "HOLD"
+                elif pcr >= 1.5:     signal = "BUY"
+                elif pcr >= 1.1:     signal = "BUY"
+                elif pcr <= 0.6:     signal = "SELL"
+                elif pcr <= 0.9:     signal = "SELL"
+                else:                signal = "HOLD"
+
+                if pcr is None:      pcr_text = "n/a"
+                elif pcr >= 1.5:     pcr_text = f"{pcr} — Strong support (high PE OI)"
+                elif pcr >= 1.1:     pcr_text = f"{pcr} — Moderate support"
+                elif pcr <= 0.6:     pcr_text = f"{pcr} — Strong resistance (high CE OI)"
+                elif pcr <= 0.9:     pcr_text = f"{pcr} — Moderate resistance"
+                else:                pcr_text = f"{pcr} — Neutral"
 
                 return {
-                    "expiry":         exp_date_str,
-                    "signal":         signal,
-                    "pcr":            pcr,
-                    "pcr_text":       pcr_text,
-                    "total_call_oi":  total_call_oi,
-                    "total_put_oi":   total_put_oi,
-                    "max_pain":       round(float(max_pain_strike), 0) if max_pain_strike else None,
-                    "ce_resistance":  [{"strike": int(r["strike"]), "oi": int(r["openInterest"]), "vol": int(r["volume"])} for r in top_ce],
-                    "pe_support":     [{"strike": int(r["strike"]), "oi": int(r["openInterest"]), "vol": int(r["volume"])} for r in top_pe],
+                    "expiry":        exp_str,
+                    "signal":        signal,
+                    "pcr":           pcr,
+                    "pcr_text":      pcr_text,
+                    "total_call_oi": total_ce_oi,
+                    "total_put_oi":  total_pe_oi,
+                    "max_pain":      mp_strike,
+                    "ce_resistance": [{"strike": k, "oi": v["oi"], "vol": v["vol"], "ltp": v["ltp"]} for k, v in top_ce],
+                    "pe_support":    [{"strike": k, "oi": v["oi"], "vol": v["vol"], "ltp": v["ltp"]} for k, v in top_pe],
                 }
 
-            out = {"spot": spot, "name": name, "ticker": ticker}
+            out = {"spot": spot, "name": display_name}
             if weekly_exp:
                 try:    out["weekly"]  = analyse_expiry(weekly_exp)
-                except Exception as e: out["weekly"] = {"error": str(e)}
+                except Exception as e: out["weekly"]  = {"error": str(e)}
             if monthly_exp and monthly_exp != weekly_exp:
                 try:    out["monthly"] = analyse_expiry(monthly_exp)
                 except Exception as e: out["monthly"] = {"error": str(e)}
+            elif monthly_exp == weekly_exp and weekly_exp:
+                out["monthly"] = out.get("weekly")   # same expiry = weekly is already the monthly
             return out
         except Exception as e:
             return {"error": str(e)}
 
     return jsonify(sanitize({
-        "NIFTY":     analyse_chain("^NSEI",    "Nifty 50"),
-        "BANKNIFTY": analyse_chain("^NSEBANK", "Bank Nifty"),
+        "NIFTY":     analyse("NIFTY",     "Nifty 50"),
+        "BANKNIFTY": analyse("BANKNIFTY", "Bank Nifty"),
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }))
 
