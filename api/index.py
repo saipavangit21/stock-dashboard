@@ -16,7 +16,6 @@ from flask import Flask, jsonify, request, render_template_string
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from textblob import TextBlob
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score
@@ -113,24 +112,68 @@ def compute_features(ticker: str) -> pd.DataFrame:
     return df
 
 
+_FINBERT_URL = "https://api-inference.huggingface.co/models/ProsusAI/finbert"
+_POS_WORDS = {"surge","soar","beat","record","growth","profit","rally","upgrade",
+              "bullish","gain","jump","rise","strong","high","boom","buy","positive"}
+_NEG_WORDS = {"fall","drop","miss","loss","cut","downgrade","bearish","decline",
+              "risk","warn","weak","crash","sell","negative","low","concern","fear"}
+
 def get_sentiment(ticker: str) -> tuple[float, list]:
-    """Return (avg_sentiment_score, list_of_headlines)"""
+    """
+    Return (avg_sentiment_score, list_of_headlines).
+    Uses FinBERT via HF Inference API when HF_API_TOKEN env var is set;
+    falls back to keyword scoring otherwise.
+    """
+    import os, requests as _req
     try:
         news = yf.Ticker(ticker).news or []
-        headlines, scores = [], []
-        for a in news[:10]:
-            # yfinance changed its news structure — try all known formats
-            title = (
-                a.get("title")
-                or a.get("content", {}).get("title")
-                or a.get("headline")
-                or ""
-            )
-            if not title:
-                continue
-            score = TextBlob(title).sentiment.polarity
-            headlines.append({"title": title, "score": round(score, 3)})
-            scores.append(score)
+        titles = []
+        for a in news[:8]:
+            title = (a.get("title")
+                     or a.get("content", {}).get("title")
+                     or a.get("headline") or "")
+            if title:
+                titles.append(title)
+        if not titles:
+            return 0.0, []
+
+        hf_token = os.environ.get("HF_API_TOKEN", "")
+        if hf_token:
+            try:
+                r = _req.post(
+                    _FINBERT_URL,
+                    headers={"Authorization": f"Bearer {hf_token}"},
+                    json={"inputs": titles},
+                    timeout=12,
+                )
+                results = r.json()
+                # Handle model-still-loading response
+                if isinstance(results, dict) and "error" in results:
+                    raise ValueError(results["error"])
+                scores, headlines = [], []
+                for i, preds in enumerate(results):
+                    if not isinstance(preds, list):
+                        continue
+                    best = max(preds, key=lambda x: x["score"])
+                    s = (best["score"]  if best["label"] == "positive" else
+                         -best["score"] if best["label"] == "negative" else 0.0)
+                    scores.append(s)
+                    headlines.append({"title": titles[i], "score": round(s, 3),
+                                      "label": best["label"]})
+                avg = round(float(np.mean(scores)), 3) if scores else 0.0
+                return avg, headlines
+            except Exception:
+                pass  # fall through to keyword fallback
+
+        # Keyword fallback (no token or FinBERT unavailable)
+        scores, headlines = [], []
+        for t in titles:
+            words = set(t.lower().split())
+            pos = len(words & _POS_WORDS)
+            neg = len(words & _NEG_WORDS)
+            s = round(max(-1.0, min(1.0, (pos - neg) / max(len(words), 1) * 4)), 3)
+            scores.append(s)
+            headlines.append({"title": t, "score": s})
         avg = round(float(np.mean(scores)), 3) if scores else 0.0
         return avg, headlines
     except Exception:
