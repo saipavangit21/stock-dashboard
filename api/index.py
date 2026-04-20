@@ -707,9 +707,16 @@ def api_chart():
             name = getattr(info, "name", ticker)
         except Exception:
             name = ticker
+        india = ticker.endswith((".NS", ".BO")) or ticker in ("^NSEI", "^NSEBANK", "^BSESN")
+        mkt_tz = "Asia/Kolkata" if india else "America/New_York"
+
         result = []
         for dt, row in raw.iterrows():
-            label = dt.strftime("%H:%M") if interval == "1h" else str(dt.date())
+            if interval == "1h":
+                local = dt.tz_convert(mkt_tz) if dt.tzinfo else dt
+                label = local.strftime("%H:%M")
+            else:
+                label = str(dt.date())
             result.append({
                 "date":   label,
                 "open":   round(float(row["Open"]),  2),
