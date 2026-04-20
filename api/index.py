@@ -738,6 +738,8 @@ def api_analyze():
     news sentiment, then derives verdict / confidence / entry / target / stop.
     """
     ticker = request.args.get("ticker", "AAPL").upper()
+    india  = ticker.endswith((".NS", ".BO")) or ticker in ("^NSEI", "^NSEBANK", "^BSESN")
+    sym    = "₹" if india else "$"
     try:
         raw    = yf.Ticker(ticker).history(period="3y")
         close  = raw["Close"].dropna()
@@ -859,17 +861,17 @@ def api_analyze():
         nearest_res = sr["resistance"][0]["price"] if sr["resistance"] else None
 
         if verdict == "BUY":
-            entry     = f"${round(price, 2)} (current) or on dip to ${nearest_sup}" if nearest_sup else f"${price}"
-            target    = f"${nearest_res}" if nearest_res else f"${round(price * 1.08, 2)} (+8%)"
-            stop_loss = f"${round(nearest_sup * 0.985, 2)}" if nearest_sup else f"${round(price * 0.95, 2)} (-5%)"
+            entry     = f"{sym}{round(price, 2)} (current) or on dip to {sym}{nearest_sup}" if nearest_sup else f"{sym}{price}"
+            target    = f"{sym}{nearest_res}" if nearest_res else f"{sym}{round(price * 1.08, 2)} (+8%)"
+            stop_loss = f"{sym}{round(nearest_sup * 0.985, 2)}" if nearest_sup else f"{sym}{round(price * 0.95, 2)} (-5%)"
         elif verdict == "SELL":
-            entry     = f"${price} (exit now) or at bounce to ${nearest_res}" if nearest_res else f"${price}"
-            target    = f"${nearest_sup}" if nearest_sup else f"${round(price * 0.92, 2)} (-8%)"
-            stop_loss = f"${round(nearest_res * 1.015, 2)}" if nearest_res else f"${round(price * 1.05, 2)} (+5%)"
+            entry     = f"{sym}{price} (exit now) or at bounce to {sym}{nearest_res}" if nearest_res else f"{sym}{price}"
+            target    = f"{sym}{nearest_sup}" if nearest_sup else f"{sym}{round(price * 0.92, 2)} (-8%)"
+            stop_loss = f"{sym}{round(nearest_res * 1.015, 2)}" if nearest_res else f"{sym}{round(price * 1.05, 2)} (+5%)"
         else:
-            entry     = f"Wait — watch ${nearest_sup} support / ${nearest_res} resistance" if nearest_sup and nearest_res else f"${price}"
-            target    = f"${nearest_res}" if nearest_res else "—"
-            stop_loss = f"${nearest_sup}" if nearest_sup else "—"
+            entry     = f"Wait — watch {sym}{nearest_sup} support / {sym}{nearest_res} resistance" if nearest_sup and nearest_res else f"{sym}{price}"
+            target    = f"{sym}{nearest_res}" if nearest_res else "—"
+            stop_loss = f"{sym}{nearest_sup}" if nearest_sup else "—"
 
         # ── Timeframe ────────────────────────────────────────────────
         if   macd_bull_bars >= 4 and vol_r > 1.5: timeframe = "short-term (days)"
@@ -902,8 +904,9 @@ def api_analyze():
         risk = "; ".join(risk_factors) if risk_factors else "Standard market and sector risk"
 
         return jsonify(sanitize({
-            "ticker":  ticker,
-            "price":   price,
+            "ticker":   ticker,
+            "currency": sym,
+            "price":    price,
             "indicators": {
                 "rsi": rsi, "rsi_z": rsi_z,
                 "macd_hist": mh, "bb_pos": bb_pos, "bb_z": bb_z,
@@ -1426,6 +1429,7 @@ let currentTab    = "us";
 let currentTicker = null;
 let currentPeriod = "2y";
 let chartInst     = null;
+let curSym        = "$";
 
 function switchTab(tab) {
   currentTab = tab;
@@ -1464,6 +1468,8 @@ function filterStocks(val) { renderSidebar(currentTab, val); }
 
 function selectStock(ticker, name) {
   currentTicker = ticker;
+  curSym = (ticker.endsWith(".NS") || ticker.endsWith(".BO") ||
+            ticker === "^NSEI" || ticker === "^NSEBANK") ? "₹" : "$";
   renderSidebar(currentTab, document.getElementById("stock-search").value);
 
   document.getElementById("empty-state").style.display  = "none";
@@ -1511,7 +1517,7 @@ async function loadChart(ticker, period) {
     const prev = pts[pts.length-2];
     const chg  = prev ? ((last.close-prev.close)/prev.close*100).toFixed(2) : null;
 
-    document.getElementById("hdr-price").textContent = `$${last.close.toLocaleString()}`;
+    document.getElementById("hdr-price").textContent = `${curSym}${last.close.toLocaleString()}`;
     if (chg !== null) {
       const el = document.getElementById("hdr-change");
       el.textContent = `${chg > 0 ? "+":""}${chg}% today`;
@@ -1546,10 +1552,10 @@ async function loadChart(ticker, period) {
         responsive:true,
         maintainAspectRatio:false,
         interaction:{mode:"index",intersect:false},
-        plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`$${c.raw.toLocaleString()}`}}},
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${curSym}${c.raw.toLocaleString()}`}}},
         scales:{
           x:{grid:{color:"rgba(255,255,255,.05)"},ticks:{color:"#8892a4",maxTicksLimit:8,font:{size:10}}},
-          y:{grid:{color:"rgba(255,255,255,.05)"},ticks:{color:"#8892a4",font:{size:10},callback:v=>`$${v.toLocaleString()}`},position:"right"},
+          y:{grid:{color:"rgba(255,255,255,.05)"},ticks:{color:"#8892a4",font:{size:10},callback:v=>`${curSym}${v.toLocaleString()}`},position:"right"},
         }
       }
     });
@@ -1607,7 +1613,7 @@ async function loadAnalysis(ticker) {
       srHtml += `<div class="sr-heading">Resistance</div>`;
       data.resistance.forEach(r => {
         srHtml += `<div class="sr-level res">
-          <span class="sr-price">$${r.price.toLocaleString()}</span>
+          <span class="sr-price">${curSym}${r.price.toLocaleString()}</span>
           <span class="sr-pct">+${r.pct_away}% away</span>
           <span class="sr-touches">${r.touches}x</span>
         </div>`;
@@ -1617,7 +1623,7 @@ async function loadAnalysis(ticker) {
       srHtml += `<div class="sr-heading" style="margin-top:.5rem;">Support</div>`;
       data.support.forEach(s => {
         srHtml += `<div class="sr-level sup">
-          <span class="sr-price">$${s.price.toLocaleString()}</span>
+          <span class="sr-price">${curSym}${s.price.toLocaleString()}</span>
           <span class="sr-pct">-${s.pct_away}% away</span>
           <span class="sr-touches">${s.touches}x</span>
         </div>`;
@@ -1680,9 +1686,9 @@ function scanCard(r, role) {
   const v = role || verdictLabel(r.buy_score, r.sell_score);
   let srHtml = "";
   if (r.resistance && r.resistance[0])
-    srHtml += `<div class="sc-sr-line res">R: $${r.resistance[0].price} (+${r.resistance[0].pct_away}%)</div>`;
+    srHtml += `<div class="sc-sr-line res">R: ${r.ticker.endsWith(".NS")||r.ticker.endsWith(".BO")?"₹":"$"}${r.resistance[0].price} (+${r.resistance[0].pct_away}%)</div>`;
   if (r.support && r.support[0])
-    srHtml += `<div class="sc-sr-line sup">S: $${r.support[0].price} (-${r.support[0].pct_away}%)</div>`;
+    srHtml += `<div class="sc-sr-line sup">S: ${r.ticker.endsWith(".NS")||r.ticker.endsWith(".BO")?"₹":"$"}${r.support[0].price} (-${r.support[0].pct_away}%)</div>`;
   return `<div class="scan-card">
     <div class="sc-top">
       <span class="sc-ticker">${r.ticker.replace(".NS","")}</span>
