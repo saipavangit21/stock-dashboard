@@ -220,11 +220,11 @@ def compute_support_resistance(highs, lows, current_price: float) -> dict:
         supports    = cluster(swing_lows)
 
         # Keep only levels on the correct side of current price
-        resistances = [r for r in resistances if r["price"] > current_price]
-        supports    = [s for s in supports    if s["price"] < current_price]
+        # Require at least 0.5% distance so we don't show levels AT the current price
+        resistances = [r for r in resistances if r["price"] / current_price - 1 >= 0.005]
+        supports    = [s for s in supports    if 1 - s["price"] / current_price >= 0.005]
 
-        # Sort by proximity first, then take top 3 regardless of distance
-        # (filter extreme outliers beyond 40% — those are from a different price era)
+        # Filter extreme outliers beyond 40% — those are from a different price era
         resistances = [r for r in resistances if r["price"] / current_price - 1 <= 0.40]
         supports    = [s for s in supports    if 1 - s["price"] / current_price <= 0.40]
 
@@ -442,9 +442,10 @@ def scan_ticker(ticker: str) -> dict | None:
         if sma_z > 0.5:        buy += 1.0   # short-term trend above its own norm
         if vol_ratio > 2.0:    buy += 1.5   # strong volume confirms breakout
         elif vol_ratio > 1.5:  buy += 0.75
-        if rsi_z > 0.5 and macd_hist > 0 and sma_z > 0.3:
+        # Momentum confluence: only valid when RSI is not in extreme overbought territory
+        if rsi_z > 0.5 and macd_hist > 0 and sma_z > 0.3 and rsi < 78:
             buy += 1.5   # momentum confluence: RSI rising + MACD bull + SMA bull
-        if ret5 > 0.03 and vol_ratio > 1.5:
+        if ret5 > 0.03 and vol_ratio > 1.5 and rsi < 78:
             buy += 1.0   # rising on above-avg volume = healthy momentum
 
         # ── Sell score (z-score based) ───────────────────────────────
@@ -453,6 +454,10 @@ def scan_ticker(ticker: str) -> dict | None:
         if rsi_z > 2.0:    sell += 3.0
         elif rsi_z > 1.5:  sell += 1.5
         elif rsi_z > 1.0:  sell += 0.5
+        # Absolute RSI guard — extreme readings regardless of z-score
+        if rsi > 85:       sell += 2.5
+        elif rsi > 80:     sell += 1.5
+        elif rsi > 78:     sell += 0.5
         if macd_hist < 0:      sell += 1.5
         if bb_z > 1.5:         sell += 2.0
         elif bb_z > 1.0:       sell += 1.0
@@ -876,11 +881,16 @@ def api_analyze():
         if ret5 < -5:   buy  += 1.5
         if ret5 >  8:   sell += 1.5
 
-        # Momentum confluence
-        if rsi_z > 0.5 and mh > 0 and sma_z > 0.3:
+        # Momentum confluence — blocked when RSI is in extreme overbought territory
+        if rsi_z > 0.5 and mh > 0 and sma_z > 0.3 and rsi < 78:
             buy += 1.5
-        if ret5 > 3 and vol_r > 1.5:
+        if ret5 > 3 and vol_r > 1.5 and rsi < 78:
             buy += 1.0
+
+        # Absolute RSI guard
+        if rsi > 85:       sell += 2.5
+        elif rsi > 80:     sell += 1.5
+        elif rsi > 78:     sell += 0.5
 
         # Sentiment nudge
         if sentiment_score > 0.1:  buy  += 0.5
