@@ -986,34 +986,20 @@ def api_analyze():
 
 @app.route("/api/options")
 def api_options():
-    """NIFTY / BankNifty options chain scraped directly from NSE with a browser session."""
-    import requests as _req
+    """
+    NIFTY / BankNifty options chain via the NSE proxy deployed on Railway/Render.
+    Set NSE_PROXY_URL env var to the proxy base URL, e.g. https://your-proxy.railway.app
+    """
+    import os, requests as _req
     from datetime import datetime as _dt, date as _date
 
-    UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-          "AppleWebKit/537.36 (KHTML, like Gecko) "
-          "Chrome/124.0.0.0 Safari/537.36")
+    proxy_base = os.environ.get("NSE_PROXY_URL", "").rstrip("/")
+    if not proxy_base:
+        return jsonify({"error": "NSE_PROXY_URL not set — deploy the proxy first"}), 503
 
-    def nse_session():
-        s = _req.Session()
-        s.headers.update({
-            "User-Agent": UA,
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-        })
-        # Establish cookies by visiting the NSE homepage first
-        s.get("https://www.nseindia.com", timeout=12, headers={
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        })
-        return s
-
-    def fetch_chain(session, symbol):
-        url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-        r = session.get(url, timeout=15, headers={
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://www.nseindia.com/option-chain",
-            "X-Requested-With": "XMLHttpRequest",
-        })
+    def fetch_records(symbol):
+        r = _req.get(f"{proxy_base}/options/{symbol}", timeout=20)
+        r.raise_for_status()
         return r.json()
 
     def compute_chain(calls, puts, expiry_str):
@@ -1046,12 +1032,11 @@ def api_options():
             "pe_support":    [{"strike":k,"oi":v["oi"],"vol":v["vol"],"ltp":v["ltp"]} for k,v in top_pe],
         }
 
-    def process_index(symbol, display_name, session):
+    def process_index(symbol, display_name):
         try:
-            data = fetch_chain(session, symbol)
-            records = data.get("records") if data else None
-            if not records:
-                return {"error": "NSE returned no data — server IP may be blocked by NSE"}
+            records = fetch_records(symbol)
+            if not records or "error" in records:
+                return {"error": records.get("error", "Proxy returned no data")}
 
             spot = float(records.get("underlyingValue", 0))
             expiry_dates = records.get("expiryDates", [])
@@ -1113,14 +1098,9 @@ def api_options():
         except Exception as e:
             return {"error": str(e)}
 
-    try:
-        sess = nse_session()
-    except Exception as e:
-        return jsonify({"error": f"NSE session failed: {e}"}), 502
-
     return jsonify(sanitize({
-        "NIFTY":        process_index("NIFTY",     "Nifty 50",   sess),
-        "BANKNIFTY":    process_index("BANKNIFTY", "Bank Nifty", sess),
+        "NIFTY":        process_index("NIFTY",     "Nifty 50"),
+        "BANKNIFTY":    process_index("BANKNIFTY", "Bank Nifty"),
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }))
 
