@@ -41,18 +41,34 @@ US_UNIVERSE = [
     "SPY", "QQQ", "ARKK", "BDMD",
 ]
 SURGE_UNIVERSE = [
-    # High-beta tech / AI
-    "NVDA", "AMD", "PLTR", "SMCI", "ARM", "IONQ", "RGTI", "QUBT",
-    # Crypto-adjacent
-    "COIN", "MSTR", "MARA", "RIOT", "CLSK", "HOOD",
-    # High-momentum / volatile
-    "TSLA", "GME", "AMC", "SOFI", "UPST", "HIMS",
-    # Speculative / small-cap tech
-    "SOUN", "BBAI", "RCAT", "RKLB", "LUNR", "ACHR",
-    # Recent high-volume movers
-    "META", "NFLX", "SNAP", "PINS", "UBER", "ABNB",
-    # EV / future-bets
-    "RIVN", "LCID", "NIO", "XPEV",
+    # Mega-cap tech (always liquid, options-heavy)
+    "AAPL", "MSFT", "NVDA", "META", "AMZN", "GOOGL", "TSLA", "NFLX",
+    # High-beta AI / semiconductors
+    "AMD", "AVGO", "QCOM", "MU", "INTC", "ARM", "SMCI", "PLTR",
+    "IONQ", "RGTI", "QUBT", "SOUN", "BBAI", "AI", "GTLB",
+    # Crypto & fintech
+    "COIN", "MSTR", "MARA", "RIOT", "CLSK", "BTBT", "HOOD", "SOFI",
+    "XYZ", "PYPL", "AFRM", "UPST",
+    # EV / energy
+    "TSLA", "RIVN", "LCID", "NIO", "XPEV", "LI", "BLNK", "CHPT",
+    "ENPH", "FSLR", "SEDG",
+    # Biotech / healthcare
+    "HIMS", "RXRX", "BEAM", "CRSP", "EDIT", "NTLA", "PACB",
+    "MRNA", "BNTX", "NVAX", "SGEN", "RCKT",
+    # Space / defense / deep tech
+    "RKLB", "LUNR", "ACHR", "JOBY", "LILM", "RCAT", "ASTS",
+    # Consumer / retail high-beta
+    "GME", "AMC", "BBBY", "SNAP", "PINS", "UBER", "LYFT", "ABNB",
+    "DASH", "ETSY", "CHWY", "W",
+    # Software / cloud
+    "SNOW", "DDOG", "NET", "CRWD", "ZS", "OKTA", "MDB", "GTLB",
+    "U", "RBLX", "PATH", "ASAN", "CFLT",
+    # Healthcare / weight-loss / trending
+    "LLY", "NVO", "HIMS", "NTRA", "OSCR",
+    # Industrials / materials high-momentum
+    "CLF", "X", "FCX", "AA", "MP",
+    # Banks / financials (volatile around earnings)
+    "BAC", "C", "WFC", "GS", "MS", "JPM",
 ]
 INDIA_UNIVERSE = [
     "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
@@ -708,73 +724,147 @@ def api_scan():
 @app.route("/api/surge")
 def api_surge():
     """
-    Scan for stocks with unusual volume + bullish call OI — pre-surge candidates.
-    Stocks that move 20-30% often show high call OI and volume buildup beforehand.
+    Pre-surge detector: finds stocks BEFORE they move 20-30%, not after.
+    Signals: Bollinger Band squeeze (volatility compression), ATR coiling,
+    neutral RSI (room to run), volume just starting to build, call OI buildup.
+    Stocks that already ran are penalised heavily.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def scan_surge(ticker):
         try:
-            t   = yf.Ticker(ticker)
-            h   = t.history(period="1mo")
-            if h.empty or len(h) < 10:
-                return None
-            close  = h["Close"].squeeze()
-            volume = h["Volume"].squeeze()
-            price  = round(float(close.iloc[-1]), 2)
-            if price < 1:
+            raw = yf.download(ticker, period="3mo", progress=False)
+            if raw.empty or len(raw) < 30:
                 return None
 
-            vol_avg   = float(volume.iloc[:-1].mean())
-            vol_ratio = round(float(volume.iloc[-1] / vol_avg), 2) if vol_avg > 0 else 1.0
-            ret5  = round(float((close.iloc[-1] / close.iloc[-5]  - 1) * 100), 2)
-            ret1  = round(float((close.iloc[-1] / close.iloc[-2]  - 1) * 100), 2)
+            close = raw["Close"].squeeze()
+            high  = raw["High"].squeeze()
+            low   = raw["Low"].squeeze()
+            vol   = raw["Volume"].squeeze()
 
+            price = round(float(close.iloc[-1]), 2)
+            if price < 1.0:
+                return None
+
+            # RSI
             delta = close.diff()
             gain  = delta.where(delta > 0, 0).rolling(14).mean()
             loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
             rsi   = round(float((100 - (100 / (1 + gain / loss))).iloc[-1]), 1)
 
-            score = 0
-            if vol_ratio > 3.0:   score += 3
-            elif vol_ratio > 2.0: score += 2
-            elif vol_ratio > 1.5: score += 1
+            # Bollinger Band squeeze: 10d std vs 30d std
+            # < 0.7 means bands are tightening → energy building for a breakout
+            bb_std_now = float(close.rolling(10).std().iloc[-1])
+            bb_std_ref = float(close.rolling(30).std().iloc[-1])
+            bb_squeeze = round(bb_std_now / bb_std_ref, 3) if bb_std_ref > 0 else 1.0
 
-            if ret5 > 15:  score += 3
-            elif ret5 > 8: score += 2
-            elif ret5 > 4: score += 1
+            # ATR compression: recent 5d ATR vs 20d ATR
+            # < 0.7 means price is coiling in a tight range
+            atr_recent = float((high - low).rolling(5).mean().iloc[-1])
+            atr_normal = float((high - low).rolling(20).mean().iloc[-1])
+            atr_ratio  = round(atr_recent / atr_normal, 3) if atr_normal > 0 else 1.0
 
-            if rsi > 80: score -= 2  # penalise extreme overbought
+            # Volume: today vs 20d baseline (exclude today from avg to avoid self-reference)
+            vol_today = float(vol.iloc[-1])
+            vol_20avg = float(vol.rolling(20).mean().iloc[-2])
+            vol_ratio = round(vol_today / vol_20avg, 2) if vol_20avg > 0 else 1.0
 
-            # Options: call/put OI ratio
+            # Returns
+            ret1 = round(float((close.iloc[-1] / close.iloc[-2]  - 1) * 100), 2)
+            ret5 = round(float((close.iloc[-1] / close.iloc[-6]  - 1) * 100), 2) if len(close) > 6 else 0.0
+
+            score   = 0
+            reasons = []
+
+            # ── Volatility compression (primary signal) ─────────────────────
+            if bb_squeeze < 0.55:
+                score += 4; reasons.append("BB squeeze")
+            elif bb_squeeze < 0.70:
+                score += 3; reasons.append("BB squeeze")
+            elif bb_squeeze < 0.80:
+                score += 2; reasons.append("BB tightening")
+            elif bb_squeeze < 0.90:
+                score += 1
+
+            # ── ATR coiling ──────────────────────────────────────────────────
+            if atr_ratio < 0.55:
+                score += 3; reasons.append("coiling")
+            elif atr_ratio < 0.70:
+                score += 2; reasons.append("coiling")
+            elif atr_ratio < 0.80:
+                score += 1
+
+            # ── Volume starting to build (not yet exploding) ─────────────────
+            if 1.4 <= vol_ratio < 2.5:
+                score += 2; reasons.append(f"vol {vol_ratio}x")
+            elif vol_ratio >= 2.5:
+                score += 1; reasons.append(f"vol {vol_ratio}x")  # already moving
+            elif vol_ratio >= 1.2:
+                score += 1
+
+            # ── RSI neutral sweet spot: room to run upward ───────────────────
+            if 42 <= rsi <= 62:
+                score += 2; reasons.append(f"RSI {rsi}")
+            elif 35 <= rsi < 42 or 62 < rsi <= 68:
+                score += 1; reasons.append(f"RSI {rsi}")
+
+            # ── Hard penalties: already moved / overbought ───────────────────
+            if rsi > 78:
+                score -= 5
+            elif rsi > 72:
+                score -= 3
+            elif rsi > 68:
+                score -= 1
+
+            if ret5 > 20:
+                score -= 6   # way too late
+            elif ret5 > 12:
+                score -= 4
+            elif ret5 > 7:
+                score -= 2
+            elif ret5 > 4:
+                score -= 1   # minor momentum still ok
+
+            # ── Call OI buildup (smart money positioning ahead of move) ──────
             call_put_ratio = None
             try:
-                exps = t.options
+                tk_obj = yf.Ticker(ticker)
+                exps   = tk_obj.options
                 if exps:
-                    chain = t.option_chain(exps[0])
+                    chain  = tk_obj.option_chain(exps[0])
                     call_oi = int(chain.calls["openInterest"].sum())
                     put_oi  = int(chain.puts["openInterest"].sum())
                     if put_oi > 0:
                         call_put_ratio = round(call_oi / put_oi, 2)
-                        if call_put_ratio > 1.5:  score += 2
-                        elif call_put_ratio > 1.2: score += 1
+                        if call_put_ratio > 2.5:
+                            score += 2; reasons.append(f"C/P {call_put_ratio}x")
+                        elif call_put_ratio > 1.5:
+                            score += 1; reasons.append(f"C/P {call_put_ratio}x")
             except Exception:
                 pass
 
-            if score < 3:
+            if score < 4:
                 return None
 
             return {
-                "ticker": ticker, "price": price,
-                "vol_ratio": vol_ratio, "ret5": ret5, "ret1": ret1,
-                "rsi": rsi, "call_put_ratio": call_put_ratio, "score": score,
+                "ticker":         ticker,
+                "price":          price,
+                "score":          score,
+                "rsi":            rsi,
+                "bb_squeeze":     bb_squeeze,
+                "atr_ratio":      atr_ratio,
+                "vol_ratio":      vol_ratio,
+                "ret5":           ret5,
+                "ret1":           ret1,
+                "call_put_ratio": call_put_ratio,
+                "reasons":        ", ".join(reasons) if reasons else "setup forming",
             }
         except Exception:
             return None
 
     results = []
     with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = {ex.submit(scan_surge, t): t for t in SURGE_UNIVERSE}
+        futures = {ex.submit(scan_surge, t): t for t in set(SURGE_UNIVERSE)}
         for f in as_completed(futures):
             r = f.result()
             if r:
@@ -783,8 +873,8 @@ def api_surge():
     results.sort(key=lambda x: x["score"], reverse=True)
 
     return jsonify(sanitize({
-        "surges":       results[:8],
-        "scanned":      len(SURGE_UNIVERSE),
+        "surges":       results[:7],
+        "scanned":      len(set(SURGE_UNIVERSE)),
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }))
 
@@ -1809,25 +1899,30 @@ function renderSurge(data) {
   const list = data.surges || [];
   let html = "";
   list.forEach(r => {
-    const sym = r.ticker.endsWith(".NS") || r.ticker.endsWith(".BO") ? "₹" : "$";
-    const cpr = r.call_put_ratio != null ? `CPR <span>${r.call_put_ratio}</span>` : "";
+    const sym      = r.ticker.endsWith(".NS") || r.ticker.endsWith(".BO") ? "₹" : "$";
+    const sqzColor = r.bb_squeeze < 0.70 ? "var(--buy)" : r.bb_squeeze < 0.85 ? "var(--neutral)" : "var(--text)";
+    const sqzLabel = r.bb_squeeze < 0.55 ? "TIGHT" : r.bb_squeeze < 0.70 ? "squeeze" : r.bb_squeeze < 0.85 ? "tightening" : "normal";
+    const atrColor = r.atr_ratio  < 0.70 ? "var(--buy)" : r.atr_ratio  < 0.85 ? "var(--neutral)" : "var(--text)";
+    const cprStr   = r.call_put_ratio != null ? ` &nbsp; C/P <span>${r.call_put_ratio}x</span>` : "";
     html += `<div>
       <div style="font-size:.7rem;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:.4rem;">
-        Score ${r.score} — Surge Candidate
+        Score ${r.score} — Pre-Surge Setup
       </div>
       <div class="scan-card">
         <div class="sc-top">
           <span class="sc-ticker">${r.ticker}</span>
-          <span class="sc-badge BUY">WATCH</span>
+          <span class="sc-badge BUY">SETUP</span>
         </div>
         <div class="sc-price">${sym}${r.price.toLocaleString()}</div>
-        <div class="sc-row">Vol <span>${r.vol_ratio}x avg</span> &nbsp; RSI <span>${r.rsi}</span></div>
+        <div class="sc-row">BB <span style="color:${sqzColor}">${sqzLabel} (${r.bb_squeeze})</span></div>
+        <div class="sc-row">ATR coil <span style="color:${atrColor}">${r.atr_ratio}</span> &nbsp; RSI <span>${r.rsi}</span></div>
+        <div class="sc-row">Vol <span>${r.vol_ratio}x</span>${cprStr}</div>
         <div class="sc-row">5d <span>${r.ret5>0?"+":""}${r.ret5}%</span> &nbsp; 1d <span>${r.ret1>0?"+":""}${r.ret1}%</span></div>
-        ${cpr ? `<div class="sc-row">${cpr}</div>` : ""}
+        <div style="font-size:.68rem;color:var(--buy);margin-top:.3rem;">${r.reasons}</div>
       </div>
     </div>`;
   });
-  document.getElementById("scan-cards").innerHTML = html || `<div style="color:var(--muted);">No surge candidates found right now</div>`;
+  document.getElementById("scan-cards").innerHTML = html || `<div style="color:var(--muted);">No pre-surge setups found right now — check back later</div>`;
   const meta = document.createElement("div");
   meta.style.cssText = "font-size:.72rem;color:var(--muted);margin-top:.8rem;grid-column:1/-1;text-align:center;";
   meta.textContent   = `Scanned ${data.scanned||0} stocks · ${new Date(data.generated_at).toLocaleTimeString()}`;
