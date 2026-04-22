@@ -1107,7 +1107,9 @@ def api_options():
 
 @app.route("/")
 def dashboard():
-    return render_template_string(HTML_TEMPLATE, stocks=STOCKS)
+    import os
+    return render_template_string(HTML_TEMPLATE, stocks=STOCKS,
+                                  nse_proxy=os.environ.get("NSE_PROXY_URL", "").rstrip("/"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1463,6 +1465,7 @@ let currentTicker = null;
 let currentPeriod = "2y";
 let chartInst     = null;
 let curSym        = "$";
+const NSE_PROXY   = "{{ nse_proxy }}";
 
 function switchTab(tab) {
   currentTab = tab;
@@ -1771,72 +1774,120 @@ function renderPenny(data) {
 }
 
 // ── India Options ─────────────────────────────────────────────
+function processChain(rows, spot, expStr) {
+  const calls = {}, puts = {};
+  for (const row of rows) {
+    if (row.expiryDate !== expStr) continue;
+    const strike = parseInt(row.strikePrice);
+    if (spot && Math.abs(strike - spot) / spot > 0.15) continue;
+    if (row.CE) calls[strike] = { oi: row.CE.openInterest||0, vol: row.CE.totalTradedVolume||0, ltp: row.CE.lastPrice||0 };
+    if (row.PE) puts[strike]  = { oi: row.PE.openInterest||0, vol: row.PE.totalTradedVolume||0, ltp: row.PE.lastPrice||0 };
+  }
+  const totalCE = Object.values(calls).reduce((s,v)=>s+v.oi,0);
+  const totalPE = Object.values(puts).reduce((s,v)=>s+v.oi,0);
+  const pcr = totalCE > 0 ? Math.round(totalPE/totalCE*1000)/1000 : null;
+
+  const strikes = [...new Set([...Object.keys(calls),...Object.keys(puts)].map(Number))].sort((a,b)=>a-b);
+  let mpVal = Infinity, mpStrike = null;
+  for (const s of strikes) {
+    const loss = Object.entries(calls).reduce((t,[k,v])=>t+Math.max(s-k,0)*v.oi,0)
+               + Object.entries(puts).reduce((t,[k,v])=>t+Math.max(k-s,0)*v.oi,0);
+    if (loss < mpVal) { mpVal = loss; mpStrike = s; }
+  }
+
+  let signal, pcrText;
+  if      (pcr === null) { signal="HOLD"; pcrText="n/a"; }
+  else if (pcr >= 1.5)   { signal="BUY";  pcrText=`${pcr} — Strong support`; }
+  else if (pcr >= 1.1)   { signal="BUY";  pcrText=`${pcr} — Moderate support`; }
+  else if (pcr <= 0.6)   { signal="SELL"; pcrText=`${pcr} — Strong resistance`; }
+  else if (pcr <= 0.9)   { signal="SELL"; pcrText=`${pcr} — Moderate resistance`; }
+  else                   { signal="HOLD"; pcrText=`${pcr} — Neutral`; }
+
+  const topCE = Object.entries(calls).sort((a,b)=>b[1].oi-a[1].oi).slice(0,3).map(([k,v])=>({strike:+k,...v}));
+  const topPE = Object.entries(puts).sort((a,b)=>b[1].oi-a[1].oi).slice(0,3).map(([k,v])=>({strike:+k,...v}));
+  return { expiry:expStr, signal, pcr, pcr_text:pcrText, total_call_oi:totalCE, total_put_oi:totalPE,
+           max_pain:mpStrike, ce_resistance:topCE, pe_support:topPE };
+}
+
+function renderExpiry(label, exp) {
+  if (!exp) return "";
+  if (exp.error) return `<div style="color:var(--muted);font-size:.8rem;margin-bottom:.8rem;">${label}: ${exp.error}</div>`;
+  const sc = exp.signal==="BUY"?"var(--up)":exp.signal==="SELL"?"var(--down)":"var(--neutral)";
+  const bg = exp.signal==="BUY"?"rgba(34,197,94,.12)":exp.signal==="SELL"?"rgba(239,68,68,.12)":"rgba(245,158,11,.12)";
+  return `<div style="background:${bg};border-radius:10px;padding:.7rem .9rem;margin-bottom:.8rem;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem;">
+      <span style="font-size:.75rem;font-weight:700;text-transform:uppercase;color:var(--muted);">${label} · ${exp.expiry}</span>
+      <span style="font-weight:800;color:${sc};font-size:.95rem;">${exp.signal}</span>
+    </div>
+    <div style="font-size:.8rem;display:grid;grid-template-columns:1fr 1fr;gap:.3rem .8rem;margin-bottom:.5rem;">
+      <span style="color:var(--muted);">PCR</span><span style="font-weight:700;">${exp.pcr_text||exp.pcr||"—"}</span>
+      <span style="color:var(--muted);">Max Pain</span><span style="font-weight:700;">${exp.max_pain?"&#8377;"+Number(exp.max_pain).toLocaleString():"—"}</span>
+      <span style="color:var(--muted);">Total CE OI</span><span>${(exp.total_call_oi||0).toLocaleString()}</span>
+      <span style="color:var(--muted);">Total PE OI</span><span>${(exp.total_put_oi||0).toLocaleString()}</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;">
+      <div><div style="font-size:.68rem;font-weight:700;text-transform:uppercase;color:var(--down);margin-bottom:.25rem;">CE Resistance</div>
+        ${(exp.ce_resistance||[]).map(r=>`<div style="display:flex;justify-content:space-between;background:rgba(239,68,68,.08);border-radius:5px;padding:.2rem .4rem;margin-bottom:.2rem;font-size:.78rem;"><span style="font-weight:700;">&#8377;${r.strike.toLocaleString()}</span><span style="color:var(--muted);">OI ${(r.oi/1e5).toFixed(1)}L</span></div>`).join("")}
+      </div>
+      <div><div style="font-size:.68rem;font-weight:700;text-transform:uppercase;color:var(--up);margin-bottom:.25rem;">PE Support</div>
+        ${(exp.pe_support||[]).map(r=>`<div style="display:flex;justify-content:space-between;background:rgba(34,197,94,.08);border-radius:5px;padding:.2rem .4rem;margin-bottom:.2rem;font-size:.78rem;"><span style="font-weight:700;">&#8377;${r.strike.toLocaleString()}</span><span style="color:var(--muted);">OI ${(r.oi/1e5).toFixed(1)}L</span></div>`).join("")}
+      </div>
+    </div>
+  </div>`;
+}
+
+async function fetchAndRenderIndex(symbol, displayName) {
+  const r = await fetch(`${NSE_PROXY}/options/${symbol}`);
+  if (!r.ok) throw new Error(`Proxy returned ${r.status}`);
+  const rec = await r.json();
+  if (rec.error) throw new Error(rec.error);
+
+  const spot = parseFloat(rec.underlyingValue || 0);
+  const expiries = (rec.expiryDates || []);
+  const rows = rec.data || [];
+  const today = new Date(); today.setHours(0,0,0,0);
+
+  const parsed = expiries.map(e => ({ str: e, dt: new Date(e.replace(/(\d+)-(\w+)-(\d+)/,(_,d,m,y)=>y+"-"+m+"-"+d)) }))
+                         .filter(e => e.dt >= today).sort((a,b)=>a.dt-b.dt);
+  if (!parsed.length) throw new Error("No future expiries");
+
+  const weeklyStr  = parsed[0].str;
+  const monthlyStr = parsed.find(e=>e.dt.getMonth()===today.getMonth())?.str || parsed[parsed.length-1].str;
+
+  const weekly  = processChain(rows, spot, weeklyStr);
+  const monthly = monthlyStr !== weeklyStr ? processChain(rows, spot, monthlyStr) : weekly;
+
+  let html = `<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem;">
+      <div class="card-title" style="margin:0;">${displayName}</div>
+      <div style="font-size:1rem;font-weight:800;">&#8377;${spot.toLocaleString()}</div>
+    </div>
+    ${renderExpiry("Weekly", weekly)}
+    ${monthlyStr !== weeklyStr ? renderExpiry("Monthly", monthly) : ""}
+  </div>`;
+  return html;
+}
+
 function showOptions() {
+  if (!NSE_PROXY) {
+    alert("NSE_PROXY_URL not configured in Vercel env vars.");
+    return;
+  }
   document.getElementById("options-overlay").style.display = "block";
   document.getElementById("options-loading").style.display = "block";
   document.getElementById("options-content").innerHTML     = "";
-  fetch("/api/options")
-    .then(r => r.json())
-    .then(data => {
-      document.getElementById("options-loading").style.display = "none";
-      let html = "";
-      for (const key of ["NIFTY","BANKNIFTY"]) {
-        const d = data[key];
-        if (!d || d.error) {
-          html += `<div class="card"><div class="card-title">${key}</div><span style="color:var(--muted)">${d?.error||"No data"}</span></div>`;
-          continue;
-        }
-        html += `<div class="card">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem;">
-            <div class="card-title" style="margin:0;">${d.name||key}</div>
-            <div style="font-size:1rem;font-weight:800;">&#8377;${(d.spot||0).toLocaleString()}</div>
-          </div>`;
-        for (const [label, exp] of [["Weekly (Day)", d.weekly], ["Monthly", d.monthly]]) {
-          if (!exp) continue;
-          if (exp.error) { html += `<div style="color:var(--muted);font-size:.8rem;margin-bottom:.8rem;">${label}: ${exp.error}</div>`; continue; }
-          const sc = exp.signal === "BUY" ? "var(--up)" : exp.signal === "SELL" ? "var(--down)" : "var(--neutral)";
-          const bg = exp.signal === "BUY" ? "rgba(34,197,94,.12)" : exp.signal === "SELL" ? "rgba(239,68,68,.12)" : "rgba(245,158,11,.12)";
-          html += `<div style="background:${bg};border-radius:10px;padding:.7rem .9rem;margin-bottom:.8rem;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem;">
-              <span style="font-size:.75rem;font-weight:700;text-transform:uppercase;color:var(--muted);">${label} · ${exp.expiry}</span>
-              <span style="font-weight:800;color:${sc};font-size:.95rem;">${exp.signal}</span>
-            </div>
-            <div style="font-size:.8rem;display:grid;grid-template-columns:1fr 1fr;gap:.3rem .8rem;margin-bottom:.5rem;">
-              <span style="color:var(--muted);">PCR</span><span style="font-weight:700;">${exp.pcr_text||exp.pcr||"—"}</span>
-              <span style="color:var(--muted);">Max Pain</span><span style="font-weight:700;">${exp.max_pain ? "&#8377;"+exp.max_pain.toLocaleString() : "—"}</span>
-              <span style="color:var(--muted);">Total CE OI</span><span>${(exp.total_call_oi||0).toLocaleString()}</span>
-              <span style="color:var(--muted);">Total PE OI</span><span>${(exp.total_put_oi||0).toLocaleString()}</span>
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;">
-              <div>
-                <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;color:var(--down);margin-bottom:.25rem;">CE Resistance (Calls)</div>
-                ${(exp.ce_resistance||[]).map(r=>`<div style="display:flex;justify-content:space-between;background:rgba(239,68,68,.08);border-radius:5px;padding:.2rem .4rem;margin-bottom:.2rem;font-size:.78rem;">
-                  <span style="font-weight:700;">&#8377;${r.strike.toLocaleString()}</span>
-                  <span style="color:var(--muted);">OI ${(r.oi/1e5).toFixed(1)}L</span>
-                </div>`).join("")}
-              </div>
-              <div>
-                <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;color:var(--up);margin-bottom:.25rem;">PE Support (Puts)</div>
-                ${(exp.pe_support||[]).map(r=>`<div style="display:flex;justify-content:space-between;background:rgba(34,197,94,.08);border-radius:5px;padding:.2rem .4rem;margin-bottom:.2rem;font-size:.78rem;">
-                  <span style="font-weight:700;">&#8377;${r.strike.toLocaleString()}</span>
-                  <span style="color:var(--muted);">OI ${(r.oi/1e5).toFixed(1)}L</span>
-                </div>`).join("")}
-              </div>
-            </div>
-          </div>`;
-        }
-        html += `</div>`;
-      }
-      document.getElementById("options-content").innerHTML = html;
-      const meta = document.createElement("div");
-      meta.style.cssText = "grid-column:1/-1;font-size:.72rem;color:var(--muted);text-align:center;margin-top:.4rem;";
-      meta.textContent = `Updated ${new Date(data.generated_at).toLocaleTimeString()}`;
-      document.getElementById("options-content").appendChild(meta);
-    })
-    .catch(e => {
-      document.getElementById("options-loading").innerHTML =
-        `<span style="color:var(--down)">Failed: ${e.message}</span>`;
-    });
+
+  Promise.all([
+    fetchAndRenderIndex("NIFTY",     "Nifty 50"),
+    fetchAndRenderIndex("BANKNIFTY", "Bank Nifty"),
+  ]).then(([n, bn]) => {
+    document.getElementById("options-loading").style.display = "none";
+    document.getElementById("options-content").innerHTML = n + bn +
+      `<div style="grid-column:1/-1;font-size:.72rem;color:var(--muted);text-align:center;margin-top:.4rem;">Updated ${new Date().toLocaleTimeString()}</div>`;
+  }).catch(e => {
+    document.getElementById("options-loading").innerHTML =
+      `<span style="color:var(--down)">Failed: ${e.message}</span>`;
+  });
 }
 document.getElementById("options-overlay").addEventListener("click", function(e){ if(e.target===this) this.style.display="none"; });
 
