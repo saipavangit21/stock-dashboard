@@ -40,11 +40,19 @@ US_UNIVERSE = [
     "XOM", "CVX", "PFE", "JNJ", "UNH",
     "SPY", "QQQ", "ARKK", "BDMD",
 ]
-PENNY_UNIVERSE = [
-    "SNDL", "CLOV", "ABAT", "IMPP", "ZENA", "PHUN",
-    "NAKD", "EXPR", "BBBY", "AMC", "GME", "WISH",
-    "NKLA", "WKHS", "RIDE", "GOEV", "XELA", "GFAI",
-    "BNGO", "SNGX", "OBSV", "CRBP", "ADMA", "AEYE",
+SURGE_UNIVERSE = [
+    # High-beta tech / AI
+    "NVDA", "AMD", "PLTR", "SMCI", "ARM", "IONQ", "RGTI", "QUBT",
+    # Crypto-adjacent
+    "COIN", "MSTR", "MARA", "RIOT", "CLSK", "HOOD",
+    # High-momentum / volatile
+    "TSLA", "GME", "AMC", "SOFI", "UPST", "HIMS",
+    # Speculative / small-cap tech
+    "SOUN", "BBAI", "RCAT", "RKLB", "LUNR", "ACHR",
+    # Recent high-volume movers
+    "META", "NFLX", "SNAP", "PINS", "UBER", "ABNB",
+    # EV / future-bets
+    "RIVN", "LCID", "NIO", "XPEV",
 ]
 INDIA_UNIVERSE = [
     "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
@@ -393,8 +401,11 @@ def scan_ticker(ticker: str) -> dict | None:
 
         ema12     = close.ewm(span=12).mean()
         ema26     = close.ewm(span=26).mean()
-        macd      = ema12 - ema26
-        macd_hist = float((macd - macd.ewm(span=9).mean()).iloc[-1])
+        macd_line = ema12 - ema26
+        sig_line  = macd_line.ewm(span=9).mean()
+        macd_hist_s = (macd_line - sig_line).dropna()
+        macd_hist   = float(macd_hist_s.iloc[-1])
+        prev_macd   = float(macd_hist_s.iloc[-2]) if len(macd_hist_s) >= 2 else macd_hist
 
         rm  = close.rolling(20).mean()
         rs  = close.rolling(20).std()
@@ -403,71 +414,55 @@ def scan_ticker(ticker: str) -> dict | None:
 
         vol_ratio = float((volume / volume.rolling(10).mean()).iloc[-1])
         price     = round(float(close.iloc[-1]), 2)
-
-        # ── Z-scores: compare current value vs this stock's own history ──
-        # This prevents flagging persistently strong stocks (UNH, HCLTECH)
-        # as overbought just because their normal RSI runs high.
-        rsi_mean  = float(rsi_series.mean())
-        rsi_std   = float(rsi_series.std())
-        rsi_z     = (rsi - rsi_mean) / rsi_std if rsi_std > 0 else 0.0
-
-        bb_mean   = float(bb_series.mean())
-        bb_std    = float(bb_series.std())
-        bb_z      = (bb_pos - bb_mean) / bb_std if bb_std > 0 else 0.0
-
-        sma_series = close.rolling(10).mean() / close.rolling(50).mean()
-        sma_mean   = float(sma_series.mean())
-        sma_std    = float(sma_series.std())
-        sma_z      = (sma_ratio - sma_mean) / sma_std if sma_std > 0 else 0.0
+        sma200    = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else float(sma50)
 
         pcr = get_pcr(ticker)
 
-        # ── Buy score (z-score based) ────────────────────────────────
-        # Two modes: oversold dip OR momentum breakout
-        buy = 0.0
+        # ── Traditional buy/sell scoring ────────────────────────────
+        buy = sell = 0.0
 
-        # Dip/oversold signals
-        if rsi_z < -2.0:   buy += 3.0
-        elif rsi_z < -1.5: buy += 1.5
-        elif rsi_z < -1.0: buy += 0.5
-        if bb_z < -1.5:        buy += 2.0
-        elif bb_z < -1.0:      buy += 1.0
-        if ret5 < -0.05:       buy += 1.5
+        # RSI absolute thresholds
+        if   rsi < 25:  buy  += 3.0
+        elif rsi < 30:  buy  += 2.0
+        elif rsi < 40:  buy  += 1.0
+        elif rsi > 75:  sell += 3.0
+        elif rsi > 70:  sell += 2.0
+        elif rsi > 60:  sell += 0.5
+
+        # MACD histogram direction
+        if macd_hist > 0:  buy  += 1.5
+        else:              sell += 1.5
+        # Fresh crossover bonus
+        if macd_hist > 0 and prev_macd <= 0:  buy  += 1.5
+        if macd_hist < 0 and prev_macd >= 0:  sell += 1.5
+
+        # Price vs SMA50 and SMA200 (trend structure)
+        if   price > sma50 and sma50 > sma200:  buy  += 2.0
+        elif price > sma50:                      buy  += 1.0
+        elif price < sma50 and sma50 < sma200:  sell += 2.0
+        elif price < sma50:                      sell += 1.0
+
+        # Bollinger Band position
+        if   bb_pos < 0.1:  buy  += 1.5
+        elif bb_pos > 0.9:  sell += 1.5
+
+        # Volume confirmation
+        if vol_ratio > 2.0:
+            if macd_hist > 0: buy  += 1.0
+            else:             sell += 1.0
+        elif vol_ratio > 1.5 and macd_hist > 0:
+            buy += 0.5
+
+        # Sharp 5-day dip = potential reversal
+        if ret5 < -0.08:   buy  += 1.5
+        elif ret5 < -0.05: buy  += 1.0
+        # Extended 5-day run = stretched
+        if ret5 > 0.10:    sell += 1.0
+
+        # PCR options sentiment
         if pcr is not None:
-            if pcr > 1.3:      buy += 1.5
-            elif pcr > 1.0:    buy += 0.5
-
-        # Momentum/breakout signals (work in bullish markets)
-        if macd_hist > 0:      buy += 1.5
-        if sma_z > 0.5:        buy += 1.0   # short-term trend above its own norm
-        if vol_ratio > 2.0:    buy += 1.5   # strong volume confirms breakout
-        elif vol_ratio > 1.5:  buy += 0.75
-        # Momentum confluence: only valid when RSI is not in extreme overbought territory
-        if rsi_z > 0.5 and macd_hist > 0 and sma_z > 0.3 and rsi < 78:
-            buy += 1.5   # momentum confluence: RSI rising + MACD bull + SMA bull
-        if ret5 > 0.03 and vol_ratio > 1.5 and rsi < 78:
-            buy += 1.0   # rising on above-avg volume = healthy momentum
-
-        # ── Sell score (z-score based) ───────────────────────────────
-        # RSI z > +1.5 means genuinely overbought *for this stock*
-        sell = 0.0
-        if rsi_z > 2.0:    sell += 3.0
-        elif rsi_z > 1.5:  sell += 1.5
-        elif rsi_z > 1.0:  sell += 0.5
-        # Absolute RSI guard — extreme readings regardless of z-score
-        if rsi > 85:       sell += 2.5
-        elif rsi > 80:     sell += 1.5
-        elif rsi > 78:     sell += 0.5
-        if macd_hist < 0:      sell += 1.5
-        if bb_z > 1.5:         sell += 2.0
-        elif bb_z > 1.0:       sell += 1.0
-        if sma_z < -0.5:       sell += 1.0  # short-term trend below its own norm
-        if vol_ratio > 2.0:    sell += 1.0
-        elif vol_ratio > 1.5:  sell += 0.5
-        if ret5 > 0.08:        sell += 1.5
-        if pcr is not None:
-            if pcr < 0.6:      sell += 1.5
-            elif pcr < 0.8:    sell += 0.5
+            if   pcr > 1.3:  buy  += 1.0
+            elif pcr < 0.7:  sell += 1.0
 
         # Reuse already-downloaded data — avoids a second yfinance call per ticker
         sr = compute_support_resistance(
@@ -480,13 +475,8 @@ def scan_ticker(ticker: str) -> dict | None:
             "buy_score":  round(buy, 2),
             "sell_score": round(sell, 2),
             "rsi":        round(rsi, 1),
-            "rsi_z":      round(rsi_z, 2),
-            "rsi_mean":   round(rsi_mean, 1),
             "bb_pos":     round(bb_pos, 3),
-            "bb_z":       round(bb_z, 2),
             "macd_hist":  round(macd_hist, 4),
-            "sma_ratio":  round(sma_ratio, 4),
-            "sma_z":      round(sma_z, 2),
             "vol_ratio":  round(vol_ratio, 2),
             "ret5":       round(ret5 * 100, 2),
             "pcr":        pcr,
@@ -715,27 +705,86 @@ def api_scan():
     }))
 
 
-@app.route("/api/penny")
-def api_penny():
-    """Scan penny stock universe and return ranked buy/sell picks."""
+@app.route("/api/surge")
+def api_surge():
+    """
+    Scan for stocks with unusual volume + bullish call OI — pre-surge candidates.
+    Stocks that move 20-30% often show high call OI and volume buildup beforehand.
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def scan_surge(ticker):
+        try:
+            t   = yf.Ticker(ticker)
+            h   = t.history(period="1mo")
+            if h.empty or len(h) < 10:
+                return None
+            close  = h["Close"].squeeze()
+            volume = h["Volume"].squeeze()
+            price  = round(float(close.iloc[-1]), 2)
+            if price < 1:
+                return None
+
+            vol_avg   = float(volume.iloc[:-1].mean())
+            vol_ratio = round(float(volume.iloc[-1] / vol_avg), 2) if vol_avg > 0 else 1.0
+            ret5  = round(float((close.iloc[-1] / close.iloc[-5]  - 1) * 100), 2)
+            ret1  = round(float((close.iloc[-1] / close.iloc[-2]  - 1) * 100), 2)
+
+            delta = close.diff()
+            gain  = delta.where(delta > 0, 0).rolling(14).mean()
+            loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rsi   = round(float((100 - (100 / (1 + gain / loss))).iloc[-1]), 1)
+
+            score = 0
+            if vol_ratio > 3.0:   score += 3
+            elif vol_ratio > 2.0: score += 2
+            elif vol_ratio > 1.5: score += 1
+
+            if ret5 > 15:  score += 3
+            elif ret5 > 8: score += 2
+            elif ret5 > 4: score += 1
+
+            if rsi > 80: score -= 2  # penalise extreme overbought
+
+            # Options: call/put OI ratio
+            call_put_ratio = None
+            try:
+                exps = t.options
+                if exps:
+                    chain = t.option_chain(exps[0])
+                    call_oi = int(chain.calls["openInterest"].sum())
+                    put_oi  = int(chain.puts["openInterest"].sum())
+                    if put_oi > 0:
+                        call_put_ratio = round(call_oi / put_oi, 2)
+                        if call_put_ratio > 1.5:  score += 2
+                        elif call_put_ratio > 1.2: score += 1
+            except Exception:
+                pass
+
+            if score < 3:
+                return None
+
+            return {
+                "ticker": ticker, "price": price,
+                "vol_ratio": vol_ratio, "ret5": ret5, "ret1": ret1,
+                "rsi": rsi, "call_put_ratio": call_put_ratio, "score": score,
+            }
+        except Exception:
+            return None
 
     results = []
     with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = {ex.submit(scan_ticker, t): t for t in PENNY_UNIVERSE}
+        futures = {ex.submit(scan_surge, t): t for t in SURGE_UNIVERSE}
         for f in as_completed(futures):
             r = f.result()
-            if r and r["price"] <= 10:   # enforce penny stock price cap
+            if r:
                 results.append(r)
 
-    # Rank top 3 buys and top 3 sells
-    top_buys  = sorted([r for r in results if r["buy_score"]  >= 3.0], key=lambda x: x["buy_score"],  reverse=True)[:3]
-    top_sells = sorted([r for r in results if r["sell_score"] >= 3.0], key=lambda x: x["sell_score"], reverse=True)[:3]
+    results.sort(key=lambda x: x["score"], reverse=True)
 
     return jsonify(sanitize({
-        "buys":         top_buys,
-        "sells":        top_sells,
-        "scanned":      len(results),
+        "surges":       results[:8],
+        "scanned":      len(SURGE_UNIVERSE),
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }))
 
@@ -845,52 +894,46 @@ def api_analyze():
         # S/R levels
         sr = compute_support_resistance(raw["High"].squeeze(), raw["Low"].squeeze(), price)
 
-        # ── Scoring (same logic as scan_ticker) ─────────────────────
+        # ── Traditional scoring ──────────────────────────────────────
         buy = sell = 0.0
 
-        # RSI z-score
-        if   rsi_z < -2.0: buy  += 3.0
-        elif rsi_z < -1.5: buy  += 1.5
-        elif rsi_z < -1.0: buy  += 0.5
-        if   rsi_z >  2.0: sell += 3.0
-        elif rsi_z >  1.5: sell += 1.5
-        elif rsi_z >  1.0: sell += 0.5
+        # RSI absolute thresholds
+        if   rsi < 25:  buy  += 3.0
+        elif rsi < 30:  buy  += 2.0
+        elif rsi < 40:  buy  += 1.0
+        elif rsi > 75:  sell += 3.0
+        elif rsi > 70:  sell += 2.0
+        elif rsi > 60:  sell += 0.5
 
-        # MACD
-        if mh > 0: buy  += 1.5
-        else:      sell += 1.5
+        # MACD histogram direction + fresh crossover
+        macd_hist_s = (macd - macd.ewm(span=9).mean()).dropna()
+        prev_mh     = float(macd_hist_s.iloc[-2]) if len(macd_hist_s) >= 2 else mh
+        if mh > 0:  buy  += 1.5
+        else:       sell += 1.5
+        if mh > 0 and prev_mh <= 0:  buy  += 1.5  # fresh bullish crossover
+        if mh < 0 and prev_mh >= 0:  sell += 1.5  # fresh bearish crossover
 
-        # BB z-score
-        if   bb_z < -1.5: buy  += 2.0
-        elif bb_z < -1.0: buy  += 1.0
-        if   bb_z >  1.5: sell += 2.0
-        elif bb_z >  1.0: sell += 1.0
+        # Price vs SMA50 and SMA200
+        if   price > sma50 and sma50 > sma200:  buy  += 2.0
+        elif price > sma50:                      buy  += 1.0
+        elif price < sma50 and sma50 < sma200:  sell += 2.0
+        elif price < sma50:                      sell += 1.0
 
-        # SMA trend
-        if   sma_z >  0.5: buy  += 1.0
-        elif sma_z < -0.5: sell += 1.0
+        # Bollinger Band position
+        if   bb_pos < 0.1:  buy  += 1.5
+        elif bb_pos > 0.9:  sell += 1.5
 
-        # Volume
+        # Volume confirmation
         if vol_r > 2.0:
-            if mh > 0: buy  += 1.5
+            if mh > 0: buy  += 1.0
             else:      sell += 1.0
-        elif vol_r > 1.5:
-            if mh > 0: buy  += 0.75
+        elif vol_r > 1.5 and mh > 0:
+            buy += 0.5
 
-        # Recent return
-        if ret5 < -5:   buy  += 1.5
-        if ret5 >  8:   sell += 1.5
-
-        # Momentum confluence — blocked when RSI is in extreme overbought territory
-        if rsi_z > 0.5 and mh > 0 and sma_z > 0.3 and rsi < 78:
-            buy += 1.5
-        if ret5 > 3 and vol_r > 1.5 and rsi < 78:
-            buy += 1.0
-
-        # Absolute RSI guard
-        if rsi > 85:       sell += 2.5
-        elif rsi > 80:     sell += 1.5
-        elif rsi > 78:     sell += 0.5
+        # Sharp dip / extended run
+        if ret5 < -8:    buy  += 1.5
+        elif ret5 < -5:  buy  += 1.0
+        if ret5 > 10:    sell += 1.0
 
         # Sentiment nudge
         if sentiment_score > 0.1:  buy  += 0.5
@@ -1310,7 +1353,7 @@ header h1 span{color:var(--accent);}
   <h1>Stock <span>Explorer</span></h1>
   <div class="hdr-btns">
     <button class="hdr-btn" onclick="showScan('market')">Market Scan</button>
-    <button class="hdr-btn" onclick="showScan('penny')">Penny Scan</button>
+    <button class="hdr-btn" onclick="showScan('surge')">Surge Scan</button>
     <button class="hdr-btn" onclick="showOptions()">India Options</button>
     <button class="hdr-btn" onclick="document.getElementById('guide-overlay').style.display='block'">Signal Guide</button>
   </div>
@@ -1677,16 +1720,16 @@ async function loadAnalysis(ticker) {
 // ── Scan ──────────────────────────────────────────────────────
 function showScan(type) {
   document.getElementById("scan-overlay").style.display = "block";
-  document.getElementById("scan-title").textContent     = type === "penny" ? "Penny Stock Scan" : "Market Scan";
+  document.getElementById("scan-title").textContent     = type === "surge" ? "Surge Scan" : "Market Scan";
   document.getElementById("scan-loading").style.display = "block";
   document.getElementById("scan-cards").innerHTML       = "";
   document.getElementById("regime-us-banner").innerHTML    = "";
   document.getElementById("regime-india-banner").innerHTML = "";
-  fetch(type === "penny" ? "/api/penny" : "/api/scan")
+  fetch(type === "surge" ? "/api/surge" : "/api/scan")
     .then(r => r.json())
     .then(data => {
       document.getElementById("scan-loading").style.display = "none";
-      if (type === "penny") renderPenny(data);
+      if (type === "surge") renderSurge(data);
       else renderScan(data);
     })
     .catch(e => {
@@ -1732,7 +1775,7 @@ function scanCard(r, role) {
     </div>
     <div class="sc-price">$${r.price.toLocaleString()}</div>
     <div class="sc-row">Buy <span>${r.buy_score}</span> &nbsp; Sell <span>${r.sell_score}</span></div>
-    <div class="sc-row">RSI <span>${r.rsi}</span> (z <span>${r.rsi_z>0?"+":""}${r.rsi_z}</span>)</div>
+    <div class="sc-row">RSI <span>${r.rsi}</span></div>
     <div class="sc-row">MACD <span>${r.macd_hist>0?"▲ bull":"▼ bear"}</span> &nbsp; Vol <span>${r.vol_ratio}x</span></div>
     <div class="sc-row">5d <span>${r.ret5}%</span>${r.pcr!=null?` &nbsp; PCR <span>${r.pcr}</span>`:""}</div>
     ${srHtml ? `<div class="sc-sr">${srHtml}</div>` : ""}
@@ -1762,14 +1805,32 @@ function renderScan(data) {
   document.getElementById("scan-cards").appendChild(meta);
 }
 
-function renderPenny(data) {
+function renderSurge(data) {
+  const list = data.surges || [];
   let html = "";
-  (data.buys ||[]).forEach(r=>{ html += `<div><div style="font-size:.7rem;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:.4rem;">Penny Buy</div>${scanCard(r,"BUY")}</div>`; });
-  (data.sells||[]).forEach(r=>{ html += `<div><div style="font-size:.7rem;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:.4rem;">Penny Sell</div>${scanCard(r,"SELL")}</div>`; });
-  document.getElementById("scan-cards").innerHTML = html || `<div style="color:var(--muted);">No penny signals found</div>`;
+  list.forEach(r => {
+    const sym = r.ticker.endsWith(".NS") || r.ticker.endsWith(".BO") ? "₹" : "$";
+    const cpr = r.call_put_ratio != null ? `CPR <span>${r.call_put_ratio}</span>` : "";
+    html += `<div>
+      <div style="font-size:.7rem;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:.4rem;">
+        Score ${r.score} — Surge Candidate
+      </div>
+      <div class="scan-card">
+        <div class="sc-top">
+          <span class="sc-ticker">${r.ticker}</span>
+          <span class="sc-badge BUY">WATCH</span>
+        </div>
+        <div class="sc-price">${sym}${r.price.toLocaleString()}</div>
+        <div class="sc-row">Vol <span>${r.vol_ratio}x avg</span> &nbsp; RSI <span>${r.rsi}</span></div>
+        <div class="sc-row">5d <span>${r.ret5>0?"+":""}${r.ret5}%</span> &nbsp; 1d <span>${r.ret1>0?"+":""}${r.ret1}%</span></div>
+        ${cpr ? `<div class="sc-row">${cpr}</div>` : ""}
+      </div>
+    </div>`;
+  });
+  document.getElementById("scan-cards").innerHTML = html || `<div style="color:var(--muted);">No surge candidates found right now</div>`;
   const meta = document.createElement("div");
   meta.style.cssText = "font-size:.72rem;color:var(--muted);margin-top:.8rem;grid-column:1/-1;text-align:center;";
-  meta.textContent   = `Scanned ${data.scanned||0} penny stocks · ${new Date(data.generated_at).toLocaleTimeString()}`;
+  meta.textContent   = `Scanned ${data.scanned||0} stocks · ${new Date(data.generated_at).toLocaleTimeString()}`;
   document.getElementById("scan-cards").appendChild(meta);
 }
 
