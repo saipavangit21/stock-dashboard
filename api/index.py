@@ -827,11 +827,11 @@ def api_surge():
 
             # ── Call OI buildup (smart money positioning ahead of move) ──────
             call_put_ratio = None
+            tk_obj = yf.Ticker(ticker)
             try:
-                tk_obj = yf.Ticker(ticker)
-                exps   = tk_obj.options
+                exps = tk_obj.options
                 if exps:
-                    chain  = tk_obj.option_chain(exps[0])
+                    chain   = tk_obj.option_chain(exps[0])
                     call_oi = int(chain.calls["openInterest"].sum())
                     put_oi  = int(chain.puts["openInterest"].sum())
                     if put_oi > 0:
@@ -843,21 +843,49 @@ def api_surge():
             except Exception:
                 pass
 
+            # ── Earnings catalyst check ──────────────────────────────────────
+            days_to_earnings = None
+            try:
+                cal = tk_obj.calendar
+                if cal is not None:
+                    ed = cal.get("Earnings Date") or cal.get("earnings_date")
+                    if ed is None and hasattr(cal, "iloc"):
+                        # calendar can be a DataFrame
+                        ed = cal.loc["Earnings Date"].dropna().tolist() if "Earnings Date" in cal.index else None
+                    if ed:
+                        if not isinstance(ed, list):
+                            ed = [ed]
+                        from datetime import date as _date
+                        today = _date.today()
+                        upcoming = [e for e in ed if hasattr(e, "date") and e.date() >= today]
+                        if upcoming:
+                            days_to_earnings = (upcoming[0].date() - today).days
+            except Exception:
+                pass
+
+            # ── ATR-based stop-loss ──────────────────────────────────────────
+            atr14      = float((high - low).rolling(14).mean().iloc[-1])
+            stop_loss  = round(price - 2.0 * atr14, 2)
+            stop_pct   = round((price - stop_loss) / price * 100, 1)
+
             if score < 4:
                 return None
 
             return {
-                "ticker":         ticker,
-                "price":          price,
-                "score":          score,
-                "rsi":            rsi,
-                "bb_squeeze":     bb_squeeze,
-                "atr_ratio":      atr_ratio,
-                "vol_ratio":      vol_ratio,
-                "ret5":           ret5,
-                "ret1":           ret1,
-                "call_put_ratio": call_put_ratio,
-                "reasons":        ", ".join(reasons) if reasons else "setup forming",
+                "ticker":            ticker,
+                "price":             price,
+                "score":             score,
+                "rsi":               rsi,
+                "bb_squeeze":        bb_squeeze,
+                "atr_ratio":         atr_ratio,
+                "vol_ratio":         vol_ratio,
+                "ret5":              ret5,
+                "ret1":              ret1,
+                "call_put_ratio":    call_put_ratio,
+                "stop_loss":         stop_loss,
+                "stop_pct":          stop_pct,
+                "days_to_earnings":  days_to_earnings,
+                "reasons":           ", ".join(reasons) if reasons else "setup forming",
             }
         except Exception:
             return None
@@ -1903,7 +1931,15 @@ function renderSurge(data) {
     const sqzColor = r.bb_squeeze < 0.70 ? "var(--buy)" : r.bb_squeeze < 0.85 ? "var(--neutral)" : "var(--text)";
     const sqzLabel = r.bb_squeeze < 0.55 ? "TIGHT" : r.bb_squeeze < 0.70 ? "squeeze" : r.bb_squeeze < 0.85 ? "tightening" : "normal";
     const atrColor = r.atr_ratio  < 0.70 ? "var(--buy)" : r.atr_ratio  < 0.85 ? "var(--neutral)" : "var(--text)";
-    const cprStr   = r.call_put_ratio != null ? ` &nbsp; C/P <span>${r.call_put_ratio}x</span>` : "";
+    const cprStr  = r.call_put_ratio != null ? ` &nbsp; C/P <span>${r.call_put_ratio}x</span>` : "";
+    const earnStr = r.days_to_earnings != null
+      ? (r.days_to_earnings <= 7
+          ? `<div class="sc-row" style="color:var(--sell)">&#9888; Earnings in <span>${r.days_to_earnings}d</span></div>`
+          : `<div class="sc-row">Earnings <span>${r.days_to_earnings}d away</span></div>`)
+      : "";
+    const stopStr = r.stop_loss != null
+      ? `<div class="sc-row">Stop <span style="color:var(--sell)">${sym}${r.stop_loss}</span> <span style="color:var(--muted)">(-${r.stop_pct}%)</span></div>`
+      : "";
     html += `<div>
       <div style="font-size:.7rem;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:.4rem;">
         Score ${r.score} — Pre-Surge Setup
@@ -1918,6 +1954,8 @@ function renderSurge(data) {
         <div class="sc-row">ATR coil <span style="color:${atrColor}">${r.atr_ratio}</span> &nbsp; RSI <span>${r.rsi}</span></div>
         <div class="sc-row">Vol <span>${r.vol_ratio}x</span>${cprStr}</div>
         <div class="sc-row">5d <span>${r.ret5>0?"+":""}${r.ret5}%</span> &nbsp; 1d <span>${r.ret1>0?"+":""}${r.ret1}%</span></div>
+        ${stopStr}
+        ${earnStr}
         <div style="font-size:.68rem;color:var(--buy);margin-top:.3rem;">${r.reasons}</div>
       </div>
     </div>`;
