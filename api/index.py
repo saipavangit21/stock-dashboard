@@ -2080,7 +2080,7 @@ function showOptions() {
       `<div style="grid-column:1/-1;font-size:.72rem;color:var(--muted);text-align:center;margin-top:.4rem;">Updated ${new Date().toLocaleTimeString()}</div>`;
   }).catch(e => {
     document.getElementById("options-loading").innerHTML =
-      `<span style="color:var(--down)">Failed: ${e.message}</span>`;
+      `<span style="color:var(--sell)">Failed: ${e.message}<br><span style="font-size:.7rem;opacity:.7;">Check NSE_PROXY_URL in Vercel env vars</span></span>`;
   });
 }
 document.getElementById("options-overlay").addEventListener("click", function(e){ if(e.target===this) this.style.display="none"; });

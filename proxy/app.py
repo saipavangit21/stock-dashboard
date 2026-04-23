@@ -1,8 +1,20 @@
 import os
-from flask import Flask, jsonify
+from flask import Flask, jsonify, make_response
 import requests
 
 app = Flask(__name__)
+
+@app.after_request
+def add_cors(response):
+    response.headers["Access-Control-Allow-Origin"]  = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    return response
+
+@app.route("/options/<symbol>", methods=["OPTIONS"])
+@app.route("/health", methods=["OPTIONS"])
+def preflight(symbol=None):
+    return make_response("", 204)
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
