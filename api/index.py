@@ -2032,8 +2032,8 @@ function renderExpiry(label, exp) {
 
 async function fetchAndRenderIndex(symbol, displayName) {
   const r = await fetch(`${NSE_PROXY}/options/${symbol}`);
-  if (!r.ok) throw new Error(`Proxy returned ${r.status}`);
   const rec = await r.json();
+  if (!r.ok) throw new Error(rec.error || `Proxy returned ${r.status}`);
   if (rec.error) throw new Error(rec.error);
 
   const spot = parseFloat(rec.underlyingValue || 0);
