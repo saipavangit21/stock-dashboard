@@ -18,30 +18,45 @@ def preflight(symbol=None):
 
 def fetch_chain(symbol):
     """
-    Load NSE option-chain page in a real headless Chrome so Akamai JavaScript
-    runs and sets cookies, then call the API from inside that browser context.
+    Load NSE in headless Chrome so Akamai JS runs and sets cookies,
+    then call the API from inside that browser context.
     """
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                  "--single-process"],
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process",
+                "--disable-http2",          # force HTTP/1.1 — avoids Akamai H2 rejection
+                "--disable-blink-features=AutomationControlled",
+            ],
         )
-        page = browser.new_page(
+        ctx = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/124.0.0.0 Safari/537.36"
-            )
+            ),
+            locale="en-US",
+            viewport={"width": 1280, "height": 800},
         )
+        page = ctx.new_page()
 
-        # Load option-chain page — this executes Akamai JS and sets all cookies
-        page.goto("https://www.nseindia.com/option-chain", wait_until="networkidle",
+        # Step 1: homepage to pick up initial cookies
+        page.goto("https://www.nseindia.com", wait_until="domcontentloaded",
                   timeout=30000)
+        page.wait_for_timeout(2000)
 
-        # Make the API call from inside the browser (has all the right cookies)
+        # Step 2: option-chain page so Akamai JS runs fully
+        page.goto("https://www.nseindia.com/option-chain",
+                  wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(3000)
+
+        # Step 3: call the API from inside the browser (all cookies already set)
         result = page.evaluate(f"""
             async () => {{
                 const r = await fetch(
