@@ -1,5 +1,4 @@
 import os
-import time
 from flask import Flask, jsonify, make_response
 
 app = Flask(__name__)
@@ -18,29 +17,49 @@ def preflight(symbol=None):
 
 
 def fetch_chain(symbol):
-    # curl_cffi impersonates Chrome TLS fingerprint — bypasses Akamai bot detection
-    from curl_cffi import requests as cf
-    s = cf.Session(impersonate="chrome124")
+    """
+    Load NSE option-chain page in a real headless Chrome so Akamai JavaScript
+    runs and sets cookies, then call the API from inside that browser context.
+    """
+    from playwright.sync_api import sync_playwright
 
-    s.get("https://www.nseindia.com", timeout=15)
-    time.sleep(1.5)
-    s.get("https://www.nseindia.com/option-chain", timeout=15, headers={
-        "Referer": "https://www.nseindia.com",
-    })
-    time.sleep(1)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                  "--single-process"],
+        )
+        page = browser.new_page(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
+        )
 
-    r = s.get(
-        f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}",
-        timeout=20,
-        headers={
-            "Accept":           "application/json, text/plain, */*",
-            "Referer":          "https://www.nseindia.com/option-chain",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-    )
-    if r.status_code != 200:
-        raise ValueError(f"NSE HTTP {r.status_code}")
-    return r.json()
+        # Load option-chain page — this executes Akamai JS and sets all cookies
+        page.goto("https://www.nseindia.com/option-chain", wait_until="networkidle",
+                  timeout=30000)
+
+        # Make the API call from inside the browser (has all the right cookies)
+        result = page.evaluate(f"""
+            async () => {{
+                const r = await fetch(
+                    '/api/option-chain-indices?symbol={symbol}',
+                    {{
+                        headers: {{
+                            'Accept': 'application/json, text/plain, */*',
+                            'X-Requested-With': 'XMLHttpRequest',
+                            'Referer': 'https://www.nseindia.com/option-chain'
+                        }}
+                    }}
+                );
+                return await r.json();
+            }}
+        """)
+
+        browser.close()
+        return result
 
 
 @app.route("/options/<symbol>")
