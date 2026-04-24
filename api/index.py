@@ -2031,7 +2031,7 @@ function renderExpiry(label, exp) {
 }
 
 async function fetchAndRenderIndex(symbol, displayName) {
-  const r = await fetch(`${NSE_PROXY}/options/${symbol}`);
+  const r = await fetch(`${NSE_PROXY}/options/${symbol}`, {headers:{"ngrok-skip-browser-warning":"1"}});
   const rec = await r.json();
   if (!r.ok) throw new Error(rec.error || `Proxy returned ${r.status}`);
   if (rec.error) throw new Error(rec.error);
