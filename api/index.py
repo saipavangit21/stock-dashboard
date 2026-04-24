@@ -879,6 +879,8 @@ def api_surge():
                 "bb_squeeze":        bb_squeeze,
                 "atr_ratio":         atr_ratio,
                 "vol_ratio":         vol_ratio,
+                "vol_today":         int(vol_today),
+                "vol_20avg":         int(vol_20avg),
                 "ret5":              ret5,
                 "ret1":              ret1,
                 "call_put_ratio":    call_put_ratio,
@@ -1923,6 +1925,14 @@ function renderScan(data) {
   document.getElementById("scan-cards").appendChild(meta);
 }
 
+function fmtVol(v) {
+  if (v == null) return "n/a";
+  if (v >= 1e9) return (v/1e9).toFixed(1)+"B";
+  if (v >= 1e6) return (v/1e6).toFixed(1)+"M";
+  if (v >= 1e3) return (v/1e3).toFixed(0)+"K";
+  return v;
+}
+
 function renderSurge(data) {
   const list = data.surges || [];
   let html = "";
@@ -1952,7 +1962,7 @@ function renderSurge(data) {
         <div class="sc-price">${sym}${r.price.toLocaleString()}</div>
         <div class="sc-row">BB <span style="color:${sqzColor}">${sqzLabel} (${r.bb_squeeze})</span></div>
         <div class="sc-row">ATR coil <span style="color:${atrColor}">${r.atr_ratio}</span> &nbsp; RSI <span>${r.rsi}</span></div>
-        <div class="sc-row">Vol <span>${r.vol_ratio}x</span>${cprStr}</div>
+        <div class="sc-row">Vol <span>${fmtVol(r.vol_today)}</span> <span style="color:var(--muted);font-size:.7rem">(${r.vol_ratio}x avg)</span>${cprStr}</div>
         <div class="sc-row">5d <span>${r.ret5>0?"+":""}${r.ret5}%</span> &nbsp; 1d <span>${r.ret1>0?"+":""}${r.ret1}%</span></div>
         ${stopStr}
         ${earnStr}
