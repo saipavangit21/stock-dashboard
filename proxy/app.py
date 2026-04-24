@@ -18,22 +18,15 @@ def preflight(symbol=None):
 
 def fetch_chain(symbol):
     """
-    Load NSE in headless Chrome so Akamai JS runs and sets cookies,
-    then call the API from inside that browser context.
+    Use patchright (patched Playwright) so Chrome TLS fingerprint matches a
+    real browser — Akamai cannot distinguish it from a genuine Chrome session.
     """
-    from playwright.sync_api import sync_playwright
+    from patchright.sync_api import sync_playwright
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--single-process",
-                "--disable-http2",          # force HTTP/1.1 — avoids Akamai H2 rejection
-                "--disable-blink-features=AutomationControlled",
-            ],
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--single-process"],
         )
         ctx = browser.new_context(
             user_agent=(
@@ -46,17 +39,17 @@ def fetch_chain(symbol):
         )
         page = ctx.new_page()
 
-        # Step 1: homepage to pick up initial cookies
+        # Step 1: homepage — picks up initial Akamai cookies
         page.goto("https://www.nseindia.com", wait_until="domcontentloaded",
                   timeout=30000)
         page.wait_for_timeout(2000)
 
-        # Step 2: option-chain page so Akamai JS runs fully
+        # Step 2: option-chain page — Akamai JS runs, bm_sv cookie is set
         page.goto("https://www.nseindia.com/option-chain",
                   wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(3000)
 
-        # Step 3: call the API from inside the browser (all cookies already set)
+        # Step 3: API call from inside the browser (all cookies already valid)
         result = page.evaluate(f"""
             async () => {{
                 const r = await fetch(
