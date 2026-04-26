@@ -2049,7 +2049,11 @@ async function fetchAndRenderIndex(symbol, displayName) {
   const spot = parseFloat(rec.underlyingValue || 0);
   const expiries = (rec.expiryDates || []);
   const rows = rec.data || [];
-  const today = new Date(); today.setHours(0,0,0,0);
+
+  // Always compare against Mumbai time (IST = UTC+5:30) regardless of viewer's location
+  const nowIST = new Date(new Date().toLocaleString("en-US", {timeZone:"Asia/Kolkata"}));
+  nowIST.setHours(0,0,0,0);
+  const today = nowIST;
 
   const parsed = expiries.map(e => ({ str: e, dt: new Date(e.replace(/(\d+)-(\w+)-(\d+)/,(_,d,m,y)=>y+"-"+m+"-"+d)) }))
                          .filter(e => e.dt >= today).sort((a,b)=>a.dt-b.dt);
