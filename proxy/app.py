@@ -1,9 +1,6 @@
 import os
 import json
-import time
-import tempfile
-import subprocess
-from flask import Flask, jsonify, make_response
+from flask import Flask, jsonify, make_response, request
 
 app = Flask(__name__)
 
@@ -11,113 +8,62 @@ app = Flask(__name__)
 def add_cors(response):
     response.headers["Access-Control-Allow-Origin"]  = "*"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
 
+@app.route("/store/<symbol>", methods=["OPTIONS"])
 @app.route("/options/<symbol>", methods=["OPTIONS"])
 @app.route("/health", methods=["OPTIONS"])
 def preflight(symbol=None):
     return make_response("", 204)
 
+# In-memory cache — bookmarklet POSTs here, dashboard GETs from here
+_cache = {}
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
-
-def curl_get(url, cookie_file, referer=None, extra_headers=None, output=None):
-    cmd = [
-        "curl", url,
-        "-H", f"User-Agent: {UA}",
-        "-H", "Accept-Language: en-US,en;q=0.9",
-        "-H", "Accept-Encoding: gzip, deflate, br",
-        "--compressed",
-        "--silent",
-        "--max-time", "20",
-        "--cookie", cookie_file,
-        "--cookie-jar", cookie_file,
-    ]
-    if referer:
-        cmd += ["-H", f"Referer: {referer}"]
-    if extra_headers:
-        for h in extra_headers:
-            cmd += ["-H", h]
-    if output:
-        cmd += ["--output", output]
-        result = subprocess.run(cmd, check=True)
-        return None
-    else:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return result.stdout
-
-
-def fetch_chain(symbol):
-    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as f:
-        cookie_file = f.name
-
-    try:
-        # Step 1: homepage — NSE sets initial session cookies
-        curl_get(
-            "https://www.nseindia.com/",
-            cookie_file,
-            extra_headers=["Accept: text/html,application/xhtml+xml,*/*;q=0.8"],
-            output=os.devnull,
-        )
-        time.sleep(1.5)
-
-        # Step 2: option-chain page — Akamai challenge runs, bm_sv cookie set
-        curl_get(
-            "https://www.nseindia.com/option-chain",
-            cookie_file,
-            referer="https://www.nseindia.com/",
-            extra_headers=["Accept: text/html,application/xhtml+xml,*/*;q=0.8"],
-            output=os.devnull,
-        )
-        time.sleep(1)
-
-        # Step 3: API call with all cookies in place
-        body = curl_get(
-            f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}",
-            cookie_file,
-            referer="https://www.nseindia.com/option-chain",
-            extra_headers=[
-                "Accept: application/json, text/plain, */*",
-                "X-Requested-With: XMLHttpRequest",
-            ],
-        )
-
-        return json.loads(body)
-
-    finally:
-        try:
-            os.unlink(cookie_file)
-        except Exception:
-            pass
-
+@app.route("/store/<symbol>", methods=["POST"])
+def store(symbol):
+    """Bookmarklet POSTs NSE data here from inside the user's real browser."""
+    symbol = symbol.upper()
+    data = request.get_json(force=True)
+    if data:
+        _cache[symbol] = data
+        return jsonify({"ok": True, "symbol": symbol})
+    return jsonify({"error": "No data received"}), 400
 
 @app.route("/options/<symbol>")
 def options(symbol):
     symbol = symbol.upper()
     if symbol not in ("NIFTY", "BANKNIFTY"):
         return jsonify({"error": "Only NIFTY and BANKNIFTY supported"}), 400
-    try:
-        data = fetch_chain(symbol)
-        if not data or "records" not in data:
-            keys = list(data.keys()) if isinstance(data, dict) else type(data).__name__
-            return jsonify({"error": f"Unexpected NSE response. Keys: {keys}"}), 502
-        return jsonify(data["records"])
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"curl failed: {e}"}), 502
-    except Exception as e:
-        return jsonify({"error": str(e)}), 502
-
+    if symbol in _cache:
+        return jsonify(_cache[symbol])
+    return jsonify({
+        "error": f"No data yet for {symbol}. Open NSE option-chain in your browser and click the bookmarklet."
+    }), 502
 
 @app.route("/health")
 def health():
-    return "ok"
-
+    cached = list(_cache.keys())
+    return jsonify({"status": "ok", "cached": cached})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
+    print(f"\n NSE Proxy running on http://localhost:{port}")
+    print("\n Bookmarklet — drag this to your bookmarks bar:")
+    print("""
+  javascript:(async()=>{
+    const base='http://localhost:8000';
+    for(const s of['NIFTY','BANKNIFTY']){
+      try{
+        const d=await fetch('/api/option-chain-indices?symbol='+s).then(r=>r.json());
+        await fetch(base+'/store/'+s,{method:'POST',body:JSON.stringify(d['records']||d),headers:{'Content-Type':'application/json'}});
+      }catch(e){alert('Error for '+s+': '+e);}
+    }
+    alert('NSE options data updated!');
+  })();
+    """)
+    print(f"\n Steps:")
+    print(f"  1. Open https://www.nseindia.com/option-chain in your browser")
+    print(f"  2. Click the bookmarklet")
+    print(f"  3. Click India Options on the dashboard\n")
     app.run(host="0.0.0.0", port=port)
