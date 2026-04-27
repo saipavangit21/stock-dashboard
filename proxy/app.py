@@ -74,6 +74,23 @@ def fetch_with_cookies():
     </body></html>"""
 
 
+@app.route("/paste-form", methods=["POST"])
+def paste_form():
+    """Receive NSE data via HTML form POST (not blocked by CSP unlike fetch)."""
+    try:
+        data = json.loads(request.form.get("data", "{}"))
+        loaded = []
+        for symbol, records in data.items():
+            _cache[symbol.upper()] = records
+            loaded.append(symbol.upper())
+        return f"""<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem;">
+        <h2>&#10003; Loaded: {', '.join(loaded)}</h2>
+        <p>Close this tab and click <b>India Options</b> on the dashboard.</p>
+        </body></html>"""
+    except Exception as e:
+        return f"Error: {e}", 400
+
+
 @app.route("/paste")
 def paste():
     """Read NSE JSON from clipboard (user copies via browser console on NSE page)."""
