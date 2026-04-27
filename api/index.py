@@ -773,8 +773,35 @@ def api_surge():
             ret1 = round(float((close.iloc[-1] / close.iloc[-2]  - 1) * 100), 2)
             ret5 = round(float((close.iloc[-1] / close.iloc[-6]  - 1) * 100), 2) if len(close) > 6 else 0.0
 
+            # ── Directional confirmation: price vs moving averages ───────────
+            sma20  = float(close.rolling(20).mean().iloc[-1])
+            sma50  = float(close.rolling(50).mean().iloc[-1])
+            above_sma20 = price > sma20
+            above_sma50 = price > sma50
+
+            # ── MACD for momentum direction ──────────────────────────────────
+            ema12    = close.ewm(span=12).mean()
+            ema26    = close.ewm(span=26).mean()
+            macd_sig = (ema12 - ema26).ewm(span=9).mean()
+            macd_hist = float((ema12 - ema26 - macd_sig).iloc[-1])
+            macd_prev = float((ema12 - ema26 - macd_sig).iloc[-2])
+
+            # ── Higher lows check: last 3 lows trending up (accumulation) ────
+            recent_lows = [float(low.iloc[-i]) for i in range(1, 6)]
+            higher_lows = recent_lows[0] > recent_lows[2] > recent_lows[4]
+
             score   = 0
             reasons = []
+
+            # ── DIRECTIONAL GATE: must show bullish bias to qualify ──────────
+            bullish_signals = sum([
+                above_sma20,
+                above_sma50,
+                macd_hist > 0,
+                higher_lows,
+            ])
+            if bullish_signals < 2:
+                return None  # squeeze with bearish bias — skip it
 
             # ── Volatility compression (primary signal) ─────────────────────
             if bb_squeeze < 0.55:
@@ -798,7 +825,7 @@ def api_surge():
             if 1.4 <= vol_ratio < 2.5:
                 score += 2; reasons.append(f"vol {vol_ratio}x")
             elif vol_ratio >= 2.5:
-                score += 1; reasons.append(f"vol {vol_ratio}x")  # already moving
+                score += 1; reasons.append(f"vol {vol_ratio}x")
             elif vol_ratio >= 1.2:
                 score += 1
 
@@ -807,6 +834,18 @@ def api_surge():
                 score += 2; reasons.append(f"RSI {rsi}")
             elif 35 <= rsi < 42 or 62 < rsi <= 68:
                 score += 1; reasons.append(f"RSI {rsi}")
+
+            # ── Bullish direction bonuses ─────────────────────────────────────
+            if above_sma20 and above_sma50:
+                score += 2; reasons.append("above MAs")
+            elif above_sma20:
+                score += 1; reasons.append("above SMA20")
+            if macd_hist > 0 and macd_prev <= 0:
+                score += 2; reasons.append("MACD cross↑")
+            elif macd_hist > 0:
+                score += 1; reasons.append("MACD bull")
+            if higher_lows:
+                score += 1; reasons.append("higher lows")
 
             # ── Hard penalties: already moved / overbought ───────────────────
             if rsi > 78:
@@ -817,13 +856,13 @@ def api_surge():
                 score -= 1
 
             if ret5 > 20:
-                score -= 6   # way too late
+                score -= 6
             elif ret5 > 12:
                 score -= 4
             elif ret5 > 7:
                 score -= 2
             elif ret5 > 4:
-                score -= 1   # minor momentum still ok
+                score -= 1
 
             # ── Call OI buildup (smart money positioning ahead of move) ──────
             call_put_ratio = None
@@ -881,6 +920,9 @@ def api_surge():
                 "vol_ratio":         vol_ratio,
                 "vol_today":         int(vol_today),
                 "vol_20avg":         int(vol_20avg),
+                "macd_bull":         macd_hist > 0,
+                "above_sma20":       above_sma20,
+                "above_sma50":       above_sma50,
                 "ret5":              ret5,
                 "ret1":              ret1,
                 "call_put_ratio":    call_put_ratio,
@@ -1960,8 +2002,8 @@ function renderSurge(data) {
           <span class="sc-badge BUY">SETUP</span>
         </div>
         <div class="sc-price">${sym}${r.price.toLocaleString()}</div>
-        <div class="sc-row">BB <span style="color:${sqzColor}">${sqzLabel} (${r.bb_squeeze})</span></div>
-        <div class="sc-row">ATR coil <span style="color:${atrColor}">${r.atr_ratio}</span> &nbsp; RSI <span>${r.rsi}</span></div>
+        <div class="sc-row">BB <span style="color:${sqzColor}">${sqzLabel} (${r.bb_squeeze})</span> &nbsp; ATR <span style="color:${atrColor}">${r.atr_ratio}</span></div>
+        <div class="sc-row">RSI <span>${r.rsi}</span> &nbsp; MACD <span style="color:${r.macd_bull?'var(--buy)':'var(--muted)'}">${r.macd_bull?'▲ bull':'▼ bear'}</span></div>
         <div class="sc-row">Vol <span>${fmtVol(r.vol_today)}</span> <span style="color:var(--muted);font-size:.7rem">(${r.vol_ratio}x avg)</span>${cprStr}</div>
         <div class="sc-row">5d <span>${r.ret5>0?"+":""}${r.ret5}%</span> &nbsp; 1d <span>${r.ret1>0?"+":""}${r.ret1}%</span></div>
         ${stopStr}
