@@ -2055,9 +2055,13 @@ async function fetchAndRenderIndex(symbol, displayName) {
   nowIST.setHours(0,0,0,0);
   const today = nowIST;
 
-  const parsed = expiries.map(e => ({ str: e, dt: new Date(e.replace(/(\d+)-(\w+)-(\d+)/,(_,d,m,y)=>y+"-"+m+"-"+d)) }))
-                         .filter(e => e.dt >= today).sort((a,b)=>a.dt-b.dt);
-  if (!parsed.length) throw new Error("No future expiries");
+  const _mo = {Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};
+  const parsed = expiries.map(e => {
+    const parts = e.split('-');
+    const iso = parts.length===3 ? `${parts[2]}-${_mo[parts[1]]||parts[1]}-${parts[0].padStart(2,'0')}` : e;
+    return { str: e, dt: new Date(iso) };
+  }).filter(e => !isNaN(e.dt) && e.dt >= today).sort((a,b)=>a.dt-b.dt);
+  if (!parsed.length) throw new Error("No future expiries (got: "+expiries.slice(0,3).join(', ')+")");
 
   const weeklyStr  = parsed[0].str;
   const monthlyStr = parsed.find(e=>e.dt.getMonth()===today.getMonth())?.str || parsed[parsed.length-1].str;
