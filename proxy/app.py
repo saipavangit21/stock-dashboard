@@ -74,6 +74,31 @@ def fetch_with_cookies():
     </body></html>"""
 
 
+@app.route("/paste")
+def paste():
+    """Read NSE JSON from clipboard (user copies via browser console on NSE page)."""
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        text = root.clipboard_get()
+        root.destroy()
+        data = json.loads(text)
+        loaded = []
+        for symbol, records in data.items():
+            _cache[symbol.upper()] = records
+            loaded.append(symbol.upper())
+        return f"""<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem;">
+        <h2>&#10003; Loaded: {', '.join(loaded)}</h2>
+        <p>You can close this tab and click <b>India Options</b> on the dashboard.</p>
+        </body></html>"""
+    except Exception as e:
+        return f"""<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem;">
+        <h2>&#9888; Error: {e}</h2>
+        <p>Make sure you ran the console script on NSE first and allowed clipboard access.</p>
+        </body></html>""", 400
+
+
 @app.route("/store/<symbol>", methods=["POST"])
 def store(symbol):
     symbol = symbol.upper()
