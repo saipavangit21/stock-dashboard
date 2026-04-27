@@ -951,6 +951,61 @@ def api_surge():
     }))
 
 
+@app.route("/api/movers")
+def api_movers():
+    """
+    Today's top gainers from Yahoo Finance's real-time screener.
+    Catches stocks already moving 10%+ with unusual volume — news-driven
+    micro/small-cap movers that can't be predicted in advance.
+    """
+    import requests as _req
+    try:
+        r = _req.get(
+            "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved",
+            params={"formatted": "false", "lang": "en-US", "region": "US",
+                    "scrIds": "day_gainers", "count": 100},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        quotes = r.json()["finance"]["result"][0]["quotes"]
+
+        movers = []
+        for q in quotes:
+            chg     = q.get("regularMarketChangePercent", 0)
+            volume  = q.get("regularMarketVolume", 0)
+            avg_vol = q.get("averageDailyVolume3Month", 1) or 1
+            vol_ratio = round(volume / avg_vol, 1)
+            mktcap  = q.get("marketCap", 0)
+
+            if chg < 10 or vol_ratio < 2:
+                continue
+
+            def fmt_cap(c):
+                if not c: return "—"
+                if c >= 1e9: return f"${c/1e9:.1f}B"
+                if c >= 1e6: return f"${c/1e6:.0f}M"
+                return f"${c/1e3:.0f}K"
+
+            movers.append({
+                "ticker":     q.get("symbol", ""),
+                "name":       q.get("shortName", ""),
+                "price":      round(q.get("regularMarketPrice", 0), 2),
+                "change_pct": round(chg, 1),
+                "volume":     volume,
+                "vol_ratio":  vol_ratio,
+                "mktcap":     fmt_cap(mktcap),
+                "mktcap_raw": mktcap,
+            })
+
+        movers.sort(key=lambda x: x["change_pct"], reverse=True)
+        return jsonify(sanitize({
+            "movers":       movers[:25],
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+        }))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+
 @app.route("/api/chart")
 def api_chart():
     ticker = request.args.get("ticker", "AAPL").upper()
@@ -1516,6 +1571,7 @@ header h1 span{color:var(--accent);}
   <div class="hdr-btns">
     <button class="hdr-btn" onclick="showScan('market')">Market Scan</button>
     <button class="hdr-btn" onclick="showScan('surge')">Surge Scan</button>
+    <button class="hdr-btn" onclick="showScan('movers')">Today's Movers</button>
     <button class="hdr-btn" onclick="showOptions()">India Options</button>
     <button class="hdr-btn" onclick="document.getElementById('guide-overlay').style.display='block'">Signal Guide</button>
   </div>
@@ -1881,17 +1937,20 @@ async function loadAnalysis(ticker) {
 
 // ── Scan ──────────────────────────────────────────────────────
 function showScan(type) {
+  const titles = {surge:"Surge Scan", market:"Market Scan", movers:"Today's Movers (+10% moves)"};
   document.getElementById("scan-overlay").style.display = "block";
-  document.getElementById("scan-title").textContent     = type === "surge" ? "Surge Scan" : "Market Scan";
+  document.getElementById("scan-title").textContent     = titles[type] || "Market Scan";
   document.getElementById("scan-loading").style.display = "block";
   document.getElementById("scan-cards").innerHTML       = "";
   document.getElementById("regime-us-banner").innerHTML    = "";
   document.getElementById("regime-india-banner").innerHTML = "";
-  fetch(type === "surge" ? "/api/surge" : "/api/scan")
+  const urls = {surge:"/api/surge", market:"/api/scan", movers:"/api/movers"};
+  fetch(urls[type] || "/api/scan")
     .then(r => r.json())
     .then(data => {
       document.getElementById("scan-loading").style.display = "none";
-      if (type === "surge") renderSurge(data);
+      if (type === "surge")  renderSurge(data);
+      else if (type === "movers") renderMovers(data);
       else renderScan(data);
     })
     .catch(e => {
@@ -1964,6 +2023,40 @@ function renderScan(data) {
   const meta = document.createElement("div");
   meta.style.cssText = "font-size:.72rem;color:var(--muted);margin-top:.8rem;grid-column:1/-1;text-align:center;";
   meta.textContent   = `Scanned ${data.us?.scanned||0} US + ${data.india?.scanned||0} India stocks · ${new Date(data.generated_at).toLocaleTimeString()}`;
+  document.getElementById("scan-cards").appendChild(meta);
+}
+
+function renderMovers(data) {
+  const list = data.movers || [];
+  if (data.error) {
+    document.getElementById("scan-cards").innerHTML = `<div style="color:var(--sell)">${data.error}</div>`;
+    return;
+  }
+  let html = "";
+  list.forEach(r => {
+    const capColor = r.mktcap_raw < 300e6 ? "var(--sell)" : r.mktcap_raw < 2e9 ? "var(--neutral)" : "var(--muted)";
+    const capLabel = r.mktcap_raw < 300e6 ? "micro" : r.mktcap_raw < 2e9 ? "small" : r.mktcap_raw < 10e9 ? "mid" : "large";
+    html += `<div>
+      <div style="font-size:.7rem;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:.4rem;">
+        +${r.change_pct}% today
+      </div>
+      <div class="scan-card">
+        <div class="sc-top">
+          <span class="sc-ticker">${r.ticker}</span>
+          <span class="sc-badge BUY">+${r.change_pct}%</span>
+        </div>
+        <div style="font-size:.72rem;color:var(--muted);margin-bottom:.3rem;">${r.name}</div>
+        <div class="sc-price">$${r.price}</div>
+        <div class="sc-row">Vol <span>${fmtVol(r.volume)}</span> <span style="color:var(--buy)">(${r.vol_ratio}x avg)</span></div>
+        <div class="sc-row">Cap <span style="color:${capColor}">${r.mktcap} (${capLabel})</span></div>
+      </div>
+    </div>`;
+  });
+  document.getElementById("scan-cards").innerHTML = html ||
+    `<div style="color:var(--muted);">No 10%+ movers right now — check during market hours (9:30 AM–4 PM ET)</div>`;
+  const meta = document.createElement("div");
+  meta.style.cssText = "font-size:.72rem;color:var(--muted);margin-top:.8rem;grid-column:1/-1;text-align:center;";
+  meta.textContent = `Live Yahoo Finance gainers · ${new Date(data.generated_at).toLocaleTimeString()}`;
   document.getElementById("scan-cards").appendChild(meta);
 }
 
