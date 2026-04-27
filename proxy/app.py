@@ -1,5 +1,6 @@
 import os
 import json
+import requests as req_lib
 from flask import Flask, jsonify, make_response, request
 
 app = Flask(__name__)
@@ -17,18 +18,71 @@ def add_cors(response):
 def preflight(symbol=None):
     return make_response("", 204)
 
-# In-memory cache — bookmarklet POSTs here, dashboard GETs from here
 _cache = {}
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+
+@app.route("/fetch")
+def fetch_with_cookies():
+    """
+    User pastes this in NSE console (bypasses CSP via window.open, not fetch):
+      window.open('http://localhost:8000/fetch?c='+encodeURIComponent(document.cookie));
+    This endpoint receives the real browser cookies and uses them server-side.
+    """
+    cookies_str = request.args.get("c", "")
+    cookies = {}
+    for pair in cookies_str.split(";"):
+        pair = pair.strip()
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            cookies[k.strip()] = v.strip()
+
+    results = {}
+    for symbol in ["NIFTY", "BANKNIFTY"]:
+        try:
+            s = req_lib.Session()
+            s.headers.update({
+                "User-Agent":        UA,
+                "Accept":            "application/json, text/plain, */*",
+                "Accept-Language":   "en-US,en;q=0.9",
+                "Accept-Encoding":   "gzip, deflate",
+                "Referer":           "https://www.nseindia.com/option-chain",
+                "X-Requested-With":  "XMLHttpRequest",
+            })
+            s.cookies.update(cookies)
+            r = s.get(
+                f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}",
+                timeout=15,
+            )
+            data = r.json()
+            if "records" in data:
+                _cache[symbol] = data["records"]
+                results[symbol] = "✓ OK"
+            else:
+                results[symbol] = f"✗ No records — keys: {list(data.keys())}"
+        except Exception as e:
+            results[symbol] = f"✗ Error: {e}"
+
+    rows = "".join(f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in results.items())
+    ok = all("✓" in v for v in results.values())
+    return f"""<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem;">
+    <h2>{"✓ NSE data updated!" if ok else "⚠ Partial result"}</h2>
+    <table border="1" cellpadding="8">{rows}</table>
+    <p style="color:#888;margin-top:1rem;">You can close this tab and use the dashboard.</p>
+    </body></html>"""
+
 
 @app.route("/store/<symbol>", methods=["POST"])
 def store(symbol):
-    """Bookmarklet POSTs NSE data here from inside the user's real browser."""
     symbol = symbol.upper()
     data = request.get_json(force=True)
     if data:
         _cache[symbol] = data
-        return jsonify({"ok": True, "symbol": symbol})
-    return jsonify({"error": "No data received"}), 400
+        return jsonify({"ok": True})
+    return jsonify({"error": "No data"}), 400
+
 
 @app.route("/options/<symbol>")
 def options(symbol):
@@ -37,33 +91,17 @@ def options(symbol):
         return jsonify({"error": "Only NIFTY and BANKNIFTY supported"}), 400
     if symbol in _cache:
         return jsonify(_cache[symbol])
-    return jsonify({
-        "error": f"No data yet for {symbol}. Open NSE option-chain in your browser and click the bookmarklet."
-    }), 502
+    return jsonify({"error": f"No data yet. Open NSE option-chain and run the console command."}), 502
+
 
 @app.route("/health")
 def health():
-    cached = list(_cache.keys())
-    return jsonify({"status": "ok", "cached": cached})
+    return jsonify({"status": "ok", "cached": list(_cache.keys())})
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    print(f"\n NSE Proxy running on http://localhost:{port}")
-    print("\n Bookmarklet — drag this to your bookmarks bar:")
-    print("""
-  javascript:(async()=>{
-    const base='http://localhost:8000';
-    for(const s of['NIFTY','BANKNIFTY']){
-      try{
-        const d=await fetch('/api/option-chain-indices?symbol='+s).then(r=>r.json());
-        await fetch(base+'/store/'+s,{method:'POST',body:JSON.stringify(d['records']||d),headers:{'Content-Type':'application/json'}});
-      }catch(e){alert('Error for '+s+': '+e);}
-    }
-    alert('NSE options data updated!');
-  })();
-    """)
-    print(f"\n Steps:")
-    print(f"  1. Open https://www.nseindia.com/option-chain in your browser")
-    print(f"  2. Click the bookmarklet")
-    print(f"  3. Click India Options on the dashboard\n")
+    print(f"\n NSE Proxy on http://localhost:{port}")
+    print("\n On NSE option-chain page, open console (F12) and paste:")
+    print(f"  window.open('http://localhost:{port}/fetch?c='+encodeURIComponent(document.cookie));")
     app.run(host="0.0.0.0", port=port)
