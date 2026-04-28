@@ -70,6 +70,32 @@ SURGE_UNIVERSE = [
     # Banks / financials (volatile around earnings)
     "BAC", "C", "WFC", "GS", "MS", "JPM",
 ]
+TREND_UNIVERSE = [
+    # Specialty pharma / biotech uptrends
+    "HIMS", "VKTX", "TGTX", "ACAD", "PRAX", "IMVT", "RDUS", "NVCR",
+    "EXAS", "NTRA", "GHDX", "VCYT", "CERT", "RARE", "FOLD", "ARGX",
+    "DAWN", "CERE", "MRUS", "INVA", "RVMD", "KYMR", "PCVX", "ARQT",
+    # Medical devices
+    "IRTC", "AXNX", "NURO", "INSP", "SWAV", "TNDM", "DXCM", "PODD",
+    # Nuclear / clean energy
+    "NNE", "OKLO", "SMR", "BWXT", "LEU", "UUUU", "CCJ", "DNN",
+    # Defense / drone tech
+    "KTOS", "AVAV", "HWM", "TDG", "DRS", "RKLB", "ASTS", "RCAT",
+    # AI / cloud small-mid cap
+    "MNDY", "TTD", "HUBS", "DOCN", "BILL", "ZI", "AEHR", "AMBA",
+    "CELH", "SMCI", "ANET", "FTNT", "PANW",
+    # Weight-loss / GLP-1
+    "LLY", "NVO", "HIMS", "ZFOX", "NTRA", "OSCR",
+    # Industrials momentum
+    "HWM", "TDG", "WWD", "AXON", "TYL", "CACI", "LDOS", "BAH",
+    # Small-cap consumer / retail momentum
+    "ELF", "CELH", "USFD", "PFGC", "CAVA", "SHAK", "BROS",
+    # Financials momentum
+    "HOOD", "SOFI", "AFRM", "UPST", "CSWC", "ARCC", "HTGC",
+    # Materials / commodities momentum
+    "MP", "USLM", "STLD", "NUE", "RS", "FCX", "RGLD", "WPM",
+]
+
 INDIA_UNIVERSE = [
     "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
     "WIPRO.NS", "HCLTECH.NS", "AXISBANK.NS", "BAJFINANCE.NS", "SBIN.NS",
@@ -1006,6 +1032,151 @@ def api_movers():
         return jsonify({"error": str(e)}), 502
 
 
+@app.route("/api/trending")
+def api_trending():
+    """
+    Trending Breakout scan: finds stocks already in a multi-week uptrend
+    that are forming a volatility squeeze at the highs — the MANE pattern.
+    Price above rising SMA20/SMA50, near 52-week highs, bands compressing.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def scan_trending(ticker):
+        try:
+            raw = yf.download(ticker, period="6mo", progress=False)
+            if raw.empty or len(raw) < 60:
+                return None
+
+            close = raw["Close"].squeeze()
+            high  = raw["High"].squeeze()
+            low   = raw["Low"].squeeze()
+            vol   = raw["Volume"].squeeze()
+
+            price  = round(float(close.iloc[-1]), 2)
+            if price < 2:
+                return None
+
+            sma20 = float(close.rolling(20).mean().iloc[-1])
+            sma50 = float(close.rolling(50).mean().iloc[-1])
+            sma20_old = float(close.rolling(20).mean().iloc[-21])
+            sma50_old = float(close.rolling(50).mean().iloc[-21])
+
+            # Uptrend gate: price > SMA20 > SMA50, both rising
+            if not (price > sma20 > sma50):
+                return None
+            if not (sma20 > sma20_old and sma50 > sma50_old):
+                return None
+
+            # RSI
+            delta = close.diff()
+            gain  = delta.where(delta > 0, 0).rolling(14).mean()
+            loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rsi   = round(float((100 - 100 / (1 + gain / loss)).iloc[-1]), 1)
+            if rsi > 80:  # exhaustion
+                return None
+
+            # BB squeeze
+            bb_now = float(close.rolling(10).std().iloc[-1])
+            bb_ref = float(close.rolling(30).std().iloc[-1])
+            bb_squeeze = round(bb_now / bb_ref, 3) if bb_ref > 0 else 1.0
+
+            # ATR compression
+            atr_r = float((high - low).rolling(5).mean().iloc[-1])
+            atr_n = float((high - low).rolling(20).mean().iloc[-1])
+            atr_ratio = round(atr_r / atr_n, 3) if atr_n > 0 else 1.0
+
+            # Distance from 52-week high
+            high_52w = float(close.max())
+            pct_from_high = round((price / high_52w - 1) * 100, 1)
+
+            # Accumulation: up-day volume vs down-day volume
+            diffs = close.diff().iloc[-20:]
+            up_vol   = float(vol.iloc[-20:][diffs > 0].mean() or 0)
+            down_vol = float(vol.iloc[-20:][diffs <= 0].mean() or 1)
+            accumulation = up_vol > down_vol * 1.1
+
+            # Returns
+            ret20 = round(float((close.iloc[-1] / close.iloc[-21] - 1) * 100), 1)
+            ret5  = round(float((close.iloc[-1] / close.iloc[-6]  - 1) * 100), 1)
+
+            vol_today = float(vol.iloc[-1])
+            vol_20avg = float(vol.rolling(20).mean().iloc[-2])
+            vol_ratio = round(vol_today / vol_20avg, 2) if vol_20avg > 0 else 1.0
+
+            score = 0; reasons = []
+
+            # Trend strength
+            score += 3; reasons.append("uptrend")
+            if sma20 > sma20_old * 1.02: score += 1; reasons.append("SMA rising fast")
+
+            # Near highs (key: squeeze at highs, not at lows)
+            if pct_from_high >= -5:
+                score += 4; reasons.append("at 52w high")
+            elif pct_from_high >= -12:
+                score += 2; reasons.append("near highs")
+            elif pct_from_high >= -20:
+                score += 1
+            else:
+                return None  # too far from highs — not the MANE pattern
+
+            # Squeeze
+            if bb_squeeze < 0.60:   score += 3; reasons.append("BB squeeze")
+            elif bb_squeeze < 0.75: score += 2; reasons.append("BB squeeze")
+            elif bb_squeeze < 0.85: score += 1
+
+            # Coiling
+            if atr_ratio < 0.65:   score += 2; reasons.append("coiling")
+            elif atr_ratio < 0.80: score += 1
+
+            # RSI in strong-trend zone
+            if 55 <= rsi <= 72:    score += 2; reasons.append(f"RSI {rsi}")
+            elif 45 <= rsi < 55:   score += 1; reasons.append(f"RSI {rsi}")
+
+            # Accumulation (smart money quietly buying)
+            if accumulation:       score += 2; reasons.append("accumulation")
+
+            # Trend momentum (not stalling)
+            if 5 < ret20 < 35:     score += 2; reasons.append(f"+{ret20}% /20d")
+            elif 2 < ret20 <= 5:   score += 1
+            elif ret20 <= 0:       score -= 3  # trend stalling
+
+            if score < 9:
+                return None
+
+            return {
+                "ticker":        ticker,
+                "price":         price,
+                "score":         score,
+                "rsi":           rsi,
+                "bb_squeeze":    bb_squeeze,
+                "atr_ratio":     atr_ratio,
+                "pct_from_high": pct_from_high,
+                "ret20":         ret20,
+                "ret5":          ret5,
+                "vol_ratio":     vol_ratio,
+                "accumulation":  accumulation,
+                "reasons":       ", ".join(reasons),
+            }
+        except Exception:
+            return None
+
+    universe = list(set(TREND_UNIVERSE + SURGE_UNIVERSE))
+    results = []
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futures = {ex.submit(scan_trending, t): t for t in universe}
+        for f in as_completed(futures):
+            r = f.result()
+            if r:
+                results.append(r)
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return jsonify(sanitize({
+        "trending":     results[:8],
+        "scanned":      len(universe),
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }))
+
+
 @app.route("/api/chart")
 def api_chart():
     ticker = request.args.get("ticker", "AAPL").upper()
@@ -1572,6 +1743,7 @@ header h1 span{color:var(--accent);}
     <button class="hdr-btn" onclick="showScan('market')">Market Scan</button>
     <button class="hdr-btn" onclick="showScan('surge')">Surge Scan</button>
     <button class="hdr-btn" onclick="showScan('movers')">Today's Movers</button>
+    <button class="hdr-btn" onclick="showScan('trending')">Trend Breakouts</button>
     <button class="hdr-btn" onclick="showOptions()">India Options</button>
     <button class="hdr-btn" onclick="document.getElementById('guide-overlay').style.display='block'">Signal Guide</button>
   </div>
@@ -1937,20 +2109,21 @@ async function loadAnalysis(ticker) {
 
 // ── Scan ──────────────────────────────────────────────────────
 function showScan(type) {
-  const titles = {surge:"Surge Scan", market:"Market Scan", movers:"Today's Movers (+10% moves)"};
+  const titles = {surge:"Surge Scan", market:"Market Scan", movers:"Today's Movers (+10% moves)", trending:"Trend Breakouts (MANE pattern)"};
   document.getElementById("scan-overlay").style.display = "block";
   document.getElementById("scan-title").textContent     = titles[type] || "Market Scan";
   document.getElementById("scan-loading").style.display = "block";
   document.getElementById("scan-cards").innerHTML       = "";
   document.getElementById("regime-us-banner").innerHTML    = "";
   document.getElementById("regime-india-banner").innerHTML = "";
-  const urls = {surge:"/api/surge", market:"/api/scan", movers:"/api/movers"};
+  const urls = {surge:"/api/surge", market:"/api/scan", movers:"/api/movers", trending:"/api/trending"};
   fetch(urls[type] || "/api/scan")
     .then(r => r.json())
     .then(data => {
       document.getElementById("scan-loading").style.display = "none";
-      if (type === "surge")  renderSurge(data);
-      else if (type === "movers") renderMovers(data);
+      if (type === "surge")    renderSurge(data);
+      else if (type === "movers")   renderMovers(data);
+      else if (type === "trending") renderTrending(data);
       else renderScan(data);
     })
     .catch(e => {
@@ -2023,6 +2196,38 @@ function renderScan(data) {
   const meta = document.createElement("div");
   meta.style.cssText = "font-size:.72rem;color:var(--muted);margin-top:.8rem;grid-column:1/-1;text-align:center;";
   meta.textContent   = `Scanned ${data.us?.scanned||0} US + ${data.india?.scanned||0} India stocks · ${new Date(data.generated_at).toLocaleTimeString()}`;
+  document.getElementById("scan-cards").appendChild(meta);
+}
+
+function renderTrending(data) {
+  const list = data.trending || [];
+  let html = "";
+  list.forEach(r => {
+    const sqzColor = r.bb_squeeze < 0.70 ? "var(--buy)" : r.bb_squeeze < 0.85 ? "var(--neutral)" : "var(--text)";
+    const highColor = r.pct_from_high >= -5 ? "var(--buy)" : r.pct_from_high >= -12 ? "var(--neutral)" : "var(--muted)";
+    html += `<div>
+      <div style="font-size:.7rem;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:.4rem;">
+        Score ${r.score} — Trend Breakout Setup
+      </div>
+      <div class="scan-card">
+        <div class="sc-top">
+          <span class="sc-ticker">${r.ticker}</span>
+          <span class="sc-badge BUY">TREND</span>
+        </div>
+        <div class="sc-price">$${r.price}</div>
+        <div class="sc-row">From 52w high <span style="color:${highColor}">${r.pct_from_high}%</span></div>
+        <div class="sc-row">BB <span style="color:${sqzColor}">${r.bb_squeeze}</span> &nbsp; ATR <span>${r.atr_ratio}</span></div>
+        <div class="sc-row">RSI <span>${r.rsi}</span> &nbsp; 20d <span style="color:var(--buy)">+${r.ret20}%</span></div>
+        <div class="sc-row">Vol <span>${r.vol_ratio}x</span> &nbsp; Accum <span style="color:${r.accumulation?'var(--buy)':'var(--muted)'}">${r.accumulation?'✓':'—'}</span></div>
+        <div style="font-size:.68rem;color:var(--buy);margin-top:.3rem;">${r.reasons}</div>
+      </div>
+    </div>`;
+  });
+  document.getElementById("scan-cards").innerHTML = html ||
+    `<div style="color:var(--muted);">No trend breakout setups found — check during market hours</div>`;
+  const meta = document.createElement("div");
+  meta.style.cssText = "font-size:.72rem;color:var(--muted);margin-top:.8rem;grid-column:1/-1;text-align:center;";
+  meta.textContent = `Scanned ${data.scanned||0} stocks · ${new Date(data.generated_at).toLocaleTimeString()}`;
   document.getElementById("scan-cards").appendChild(meta);
 }
 
