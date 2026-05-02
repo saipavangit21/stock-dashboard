@@ -1745,6 +1745,7 @@ header h1 span{color:var(--accent);}
     <button class="hdr-btn" onclick="showScan('movers')">Today's Movers</button>
     <button class="hdr-btn" onclick="showScan('trending')">Trend Breakouts</button>
     <button class="hdr-btn" onclick="showOptions()">India Options</button>
+    <button class="hdr-btn" onclick="document.getElementById('rr-overlay').style.display='flex'" style="background:var(--buy);color:#000;font-weight:800;">R:R Calc</button>
     <button class="hdr-btn" onclick="document.getElementById('guide-overlay').style.display='block'">Signal Guide</button>
   </div>
 </header>
@@ -1831,6 +1832,49 @@ header h1 span{color:var(--accent);}
     <div id="regime-india-banner"></div>
     <div id="scan-loading" class="scan-loading"><div class="spin"></div><div>Scanning…</div></div>
     <div id="scan-cards"></div>
+  </div>
+</div>
+
+<!-- R:R Calculator overlay -->
+<div id="rr-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:200;align-items:center;justify-content:center;">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:1.8rem;width:360px;max-width:95vw;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.2rem;">
+      <h2 style="font-size:1rem;font-weight:800;">Trade R:R Calculator</h2>
+      <button onclick="document.getElementById('rr-overlay').style.display='none'" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:1.4rem;">&#x2715;</button>
+    </div>
+    <div style="display:grid;gap:.7rem;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem;">
+        <label style="font-size:.78rem;color:var(--muted);">Entry Price
+          <input id="rr-entry" type="number" step="0.01" placeholder="e.g. 250"
+            oninput="calcRR()" style="width:100%;margin-top:.3rem;padding:.5rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;font-size:.85rem;">
+        </label>
+        <label style="font-size:.78rem;color:var(--muted);">Stop Loss
+          <input id="rr-sl" type="number" step="0.01" placeholder="e.g. 235"
+            oninput="calcRR()" style="width:100%;margin-top:.3rem;padding:.5rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;font-size:.85rem;">
+        </label>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem;">
+        <label style="font-size:.78rem;color:var(--muted);">Target 1
+          <input id="rr-t1" type="number" step="0.01" placeholder="e.g. 275"
+            oninput="calcRR()" style="width:100%;margin-top:.3rem;padding:.5rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;font-size:.85rem;">
+        </label>
+        <label style="font-size:.78rem;color:var(--muted);">Target 2
+          <input id="rr-t2" type="number" step="0.01" placeholder="e.g. 295"
+            oninput="calcRR()" style="width:100%;margin-top:.3rem;padding:.5rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;font-size:.85rem;">
+        </label>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem;">
+        <label style="font-size:.78rem;color:var(--muted);">Capital (₹/$)
+          <input id="rr-capital" type="number" step="1000" placeholder="e.g. 100000"
+            oninput="calcRR()" style="width:100%;margin-top:.3rem;padding:.5rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;font-size:.85rem;">
+        </label>
+        <label style="font-size:.78rem;color:var(--muted);">Risk % per trade
+          <input id="rr-risk-pct" type="number" step="0.5" value="1" min="0.1" max="5"
+            oninput="calcRR()" style="width:100%;margin-top:.3rem;padding:.5rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;font-size:.85rem;">
+        </label>
+      </div>
+    </div>
+    <div id="rr-result" style="margin-top:1.2rem;"></div>
   </div>
 </div>
 
@@ -2442,6 +2486,71 @@ function showOptions() {
   });
 }
 document.getElementById("options-overlay").addEventListener("click", function(e){ if(e.target===this) this.style.display="none"; });
+
+// ── R:R Calculator ────────────────────────────────────────────
+function calcRR() {
+  const entry   = parseFloat(document.getElementById("rr-entry").value);
+  const sl      = parseFloat(document.getElementById("rr-sl").value);
+  const t1      = parseFloat(document.getElementById("rr-t1").value);
+  const t2      = parseFloat(document.getElementById("rr-t2").value);
+  const capital = parseFloat(document.getElementById("rr-capital").value) || 0;
+  const riskPct = parseFloat(document.getElementById("rr-risk-pct").value) || 1;
+  const el      = document.getElementById("rr-result");
+
+  if (!entry || !sl || (!t1 && !t2)) { el.innerHTML = ""; return; }
+
+  const risk = Math.abs(entry - sl);
+  if (risk === 0) { el.innerHTML = "<div style='color:var(--sell)'>SL cannot equal entry</div>"; return; }
+
+  const isLong = entry > sl;
+  const rr1 = t1 ? (Math.abs(t1 - entry) / risk) : null;
+  const rr2 = t2 ? (Math.abs(t2 - entry) / risk) : null;
+  const bestRR = rr2 || rr1;
+  const go = bestRR >= 2;
+
+  // Position sizing
+  let posHtml = "";
+  if (capital > 0) {
+    const riskAmt  = capital * riskPct / 100;
+    const qty      = Math.floor(riskAmt / risk);
+    const invest   = qty * entry;
+    const maxLoss  = qty * risk;
+    const profitT1 = t1 ? qty * Math.abs(t1 - entry) : 0;
+    const profitT2 = t2 ? qty * Math.abs(t2 - entry) : 0;
+    const sym = entry > 100 ? "₹" : "$";
+    posHtml = `
+      <div style="margin-top:.8rem;padding:.7rem;background:var(--bg);border-radius:8px;font-size:.78rem;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;">
+          <span style="color:var(--muted);">Qty</span><span style="font-weight:700;">${qty} shares</span>
+          <span style="color:var(--muted);">Investment</span><span>${sym}${invest.toLocaleString(undefined,{maximumFractionDigits:0})}</span>
+          <span style="color:var(--muted);">Max Loss</span><span style="color:var(--sell);">${sym}${maxLoss.toLocaleString(undefined,{maximumFractionDigits:0})}</span>
+          ${profitT1?`<span style="color:var(--muted);">Profit T1</span><span style="color:var(--buy);">${sym}${profitT1.toLocaleString(undefined,{maximumFractionDigits:0})}</span>`:""}
+          ${profitT2?`<span style="color:var(--muted);">Profit T2</span><span style="color:var(--buy);">${sym}${profitT2.toLocaleString(undefined,{maximumFractionDigits:0})}</span>`:""}
+        </div>
+      </div>`;
+  }
+
+  el.innerHTML = `
+    <div style="text-align:center;padding:1rem;border-radius:12px;background:${go?"rgba(74,222,128,.15)":"rgba(239,68,68,.15)"};border:2px solid ${go?"var(--buy)":"var(--sell)"};">
+      <div style="font-size:2rem;font-weight:900;color:${go?"var(--buy)":"var(--sell)"};">${go?"GO ✓":"SKIP ✗"}</div>
+      <div style="font-size:.78rem;color:var(--muted);margin-top:.2rem;">${isLong?"Long":"Short"} · Risk per share: ${risk.toFixed(2)}</div>
+    </div>
+    <div style="display:grid;grid-template-columns:${t1&&t2?"1fr 1fr":"1fr"};gap:.6rem;margin-top:.8rem;">
+      ${rr1?`<div style="padding:.6rem;background:var(--bg);border-radius:8px;text-align:center;">
+        <div style="font-size:.7rem;color:var(--muted);">Target 1 R:R</div>
+        <div style="font-size:1.3rem;font-weight:800;color:${rr1>=1.5?"var(--buy)":"var(--sell)"};">${rr1.toFixed(2)}:1</div>
+      </div>`:""}
+      ${rr2?`<div style="padding:.6rem;background:var(--bg);border-radius:8px;text-align:center;">
+        <div style="font-size:.7rem;color:var(--muted);">Target 2 R:R</div>
+        <div style="font-size:1.3rem;font-weight:800;color:${rr2>=2?"var(--buy)":"var(--sell)"};">${rr2.toFixed(2)}:1</div>
+      </div>`:""}
+    </div>
+    ${posHtml}`;
+}
+
+document.getElementById("rr-overlay").addEventListener("click", function(e) {
+  if (e.target === this) this.style.display = "none";
+});
 
 // Init
 renderSidebar("us","");
