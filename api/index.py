@@ -982,6 +982,59 @@ def api_surge():
     }))
 
 
+MY_PORTFOLIO = {
+    "CSWC": 23.56,
+    "VOO":  114.05,
+    "GME":  25.19,
+    "CCEC": 22.00,
+    "NVAX": 8.22,
+    "NIO":  6.24,
+    "RXRX": 3.54,
+    "BDMD": 3.09,
+}
+
+@app.route("/api/portfolio")
+def api_portfolio():
+    """Live P/L for each portfolio position based on entry prices."""
+    results = []
+    tickers = list(MY_PORTFOLIO.keys())
+    try:
+        import yfinance as yf
+        data = yf.download(tickers, period="1d", progress=False)
+        prices = data["Close"].iloc[-1] if not data.empty else {}
+    except Exception:
+        prices = {}
+
+    total_cost = 0
+    total_value = 0
+
+    for ticker, entry in MY_PORTFOLIO.items():
+        try:
+            current = float(prices[ticker]) if ticker in prices else None
+            if current is None:
+                info = yf.Ticker(ticker).fast_info
+                current = float(getattr(info, "last_price", entry))
+            pl_pct = round((current - entry) / entry * 100, 2)
+            results.append({
+                "ticker":  ticker,
+                "entry":   entry,
+                "current": round(current, 2),
+                "pl_pct":  pl_pct,
+                "pl_abs":  round(current - entry, 2),
+            })
+            total_cost  += entry
+            total_value += current
+        except Exception:
+            results.append({"ticker": ticker, "entry": entry, "current": None, "pl_pct": None, "pl_abs": None})
+
+    overall_pct = round((total_value - total_cost) / total_cost * 100, 2) if total_cost > 0 else 0
+    return jsonify(sanitize({
+        "positions":    results,
+        "overall_pct":  overall_pct,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }))
+
+
 @app.route("/api/movers")
 def api_movers():
     """
@@ -1762,6 +1815,10 @@ header h1 span{color:var(--accent);}
     <div class="tab-row">
       <div class="tab active" id="tab-us"    onclick="switchTab('us')">US</div>
       <div class="tab"        id="tab-india" onclick="switchTab('india')">India</div>
+    </div>
+    <div style="padding:.4rem .9rem .2rem;display:flex;justify-content:space-between;align-items:center;">
+      <span style="font-size:.7rem;color:var(--muted);">My Portfolio</span>
+      <span id="portfolio-overall" style="font-size:.72rem;font-weight:700;">—</span>
     </div>
     <input id="stock-search" placeholder="Search ticker or name…" oninput="filterStocks(this.value)"/>
     <div id="stock-list"></div>
@@ -2572,8 +2629,32 @@ document.getElementById("rr-overlay").addEventListener("click", function(e) {
   if (e.target === this) this.style.display = "none";
 });
 
+// ── Live Portfolio P/L ─────────────────────────────────────────
+function loadPortfolio() {
+  fetch("/api/portfolio")
+    .then(r => r.json())
+    .then(data => {
+      // Update UNIVERSE with live P/L
+      const pnl = {};
+      (data.positions || []).forEach(p => { if (p.pl_pct != null) pnl[p.ticker] = p.pl_pct; });
+      UNIVERSE.us["⭐ My Portfolio"].forEach(s => { if (pnl[s.t] != null) s.pl = pnl[s.t]; });
+      renderSidebar(currentTab, document.getElementById("stock-search").value);
+
+      // Show overall P/L in header
+      const overall = data.overall_pct;
+      if (overall != null) {
+        const el = document.getElementById("portfolio-overall");
+        if (el) {
+          el.textContent = `Portfolio: ${overall >= 0 ? "+" : ""}${overall.toFixed(2)}%`;
+          el.style.color = overall >= 0 ? "var(--buy)" : "var(--sell)";
+        }
+      }
+    }).catch(() => {});
+}
+
 // Init
 renderSidebar("us","");
+loadPortfolio();
 </script>
 </body>
 </html>
