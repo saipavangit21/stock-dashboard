@@ -29,7 +29,12 @@ _cache      = {}
 _cache_date = {}
 _lock       = threading.Lock()
 
-STOCKS     = ["AAPL", "MSFT", "TSLA", "NVDA", "^NSEI", "BDMD"]
+STOCKS     = [
+    # My Portfolio
+    "CSWC", "GME", "CCEC", "VOO", "NVAX", "NIO", "RXRX", "BDMD",
+    # Watchlist
+    "AAPL", "MSFT", "TSLA", "NVDA", "^NSEI",
+]
 START_DATE = "2022-01-01"   # 2 years keeps training fast for serverless
 SR_START   = "2018-01-01"   # 6+ years of history for support/resistance
 
@@ -1918,12 +1923,21 @@ header h1 span{color:var(--accent);}
 <script>
 const UNIVERSE = {
   us: {
+    "⭐ My Portfolio": [
+      {t:"CSWC", n:"Capital Southwest",   pl:+3.1},
+      {t:"VOO",  n:"Vanguard ETF",        pl:+5.0},
+      {t:"GME",  n:"GameStop",            pl:-4.0},
+      {t:"CCEC", n:"Cap Clean Energy",    pl:-7.4},
+      {t:"NVAX", n:"Novanax",             pl:-2.92},
+      {t:"NIO",  n:"NIO",                 pl:-4.8},
+      {t:"RXRX", n:"Recursion Pharma",    pl:-5.37},
+      {t:"BDMD", n:"Baird Medical",       pl:-40.0},
+    ],
     Technology:  [{t:"AAPL",n:"Apple"},{t:"MSFT",n:"Microsoft"},{t:"NVDA",n:"NVIDIA"},{t:"AMD",n:"AMD"},{t:"META",n:"Meta"},{t:"GOOGL",n:"Alphabet"},{t:"AMZN",n:"Amazon"},{t:"TSLA",n:"Tesla"}],
     Finance:     [{t:"JPM",n:"JP Morgan"},{t:"BAC",n:"Bank of America"},{t:"GS",n:"Goldman Sachs"},{t:"MS",n:"Morgan Stanley"},{t:"V",n:"Visa"},{t:"MA",n:"Mastercard"}],
     Healthcare:  [{t:"UNH",n:"UnitedHealth"},{t:"PFE",n:"Pfizer"},{t:"JNJ",n:"J&J"}],
     Energy:      [{t:"XOM",n:"ExxonMobil"},{t:"CVX",n:"Chevron"}],
     ETFs:        [{t:"SPY",n:"S&P 500 ETF"},{t:"QQQ",n:"Nasdaq ETF"},{t:"ARKK",n:"ARK Innovation"}],
-    Speculative: [{t:"BDMD",n:"Baird Medical"}],
   },
   india: {
     IT:      [{t:"TCS.NS",n:"TCS"},{t:"INFY.NS",n:"Infosys"},{t:"WIPRO.NS",n:"Wipro"},{t:"HCLTECH.NS",n:"HCL Tech"}],
@@ -1966,11 +1980,17 @@ function renderSidebar(tab, filter) {
     html += `<div class="sector-label">${sector}</div>`;
     for (const s of visible) {
       const sel = s.t === currentTicker ? " selected" : "";
+      const plBadge = s.pl != null
+        ? `<span style="font-size:.68rem;font-weight:700;padding:.15rem .4rem;border-radius:4px;
+            background:${s.pl>=0?"rgba(74,222,128,.15)":"rgba(239,68,68,.15)"};
+            color:${s.pl>=0?"var(--buy)":"var(--sell)"};">${s.pl>=0?"+":""}${s.pl}%</span>`
+        : "";
       html += `<div class="stock-item${sel}" onclick="selectStock('${s.t}','${s.n.replace(/'/g,"\\\\'")}')" >
-        <div>
+        <div style="flex:1;">
           <div style="font-weight:700;">${s.t.replace(".NS","")}</div>
           <div class="stk-name">${s.n}</div>
         </div>
+        ${plBadge}
       </div>`;
     }
   }
