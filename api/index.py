@@ -983,14 +983,14 @@ def api_surge():
 
 
 MY_PORTFOLIO = {
-    "CSWC": 23.56,
-    "VOO":  114.05,
-    "GME":  25.19,
-    "CCEC": 22.00,
-    "NVAX": 8.22,
-    "NIO":  6.24,
-    "RXRX": 3.54,
-    "BDMD": 3.09,
+    "CSWC":    23.56,
+    "VUAA.DE": 114.05,   # Vanguard S&P 500 UCITS ETF (USD Acc) on Xetra
+    "GME":     25.19,
+    "CCEC":    22.00,
+    "NVAX":    8.22,
+    "NIO":     6.24,
+    "RXRX":    3.54,
+    "BDMD":    3.09,
 }
 
 @app.route("/api/portfolio")
@@ -1982,7 +1982,7 @@ const UNIVERSE = {
   us: {
     "⭐ My Portfolio": [
       {t:"CSWC", n:"Capital Southwest",   pl:+3.1},
-      {t:"VOO",  n:"Vanguard ETF",        pl:+5.0},
+      {t:"VUAA.DE", n:"Vanguard S&P500 UCITS", pl:+5.0},
       {t:"GME",  n:"GameStop",            pl:-4.0},
       {t:"CCEC", n:"Cap Clean Energy",    pl:-7.4},
       {t:"NVAX", n:"Novanax",             pl:-2.92},
