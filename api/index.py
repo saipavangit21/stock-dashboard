@@ -1842,7 +1842,6 @@ header h1 span{color:var(--accent);}
       <div class="tab"        id="tab-india" onclick="switchTab('india')">India</div>
     </div>
     <div style="padding:.5rem .9rem .3rem;">
-      <div style="font-size:.72rem;font-weight:700;color:var(--muted);margin-bottom:.2rem;">MY PORTFOLIO</div>
       <div id="portfolio-overall" style="line-height:1.5;">—</div>
     </div>
     <input id="stock-search" placeholder="Search ticker or name…" oninput="filterStocks(this.value)"/>
