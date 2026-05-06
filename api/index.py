@@ -983,55 +983,78 @@ def api_surge():
 
 
 MY_PORTFOLIO = {
-    "CSWC":    23.56,
-    "VUAA.DE": 114.05,   # Vanguard S&P 500 UCITS ETF (USD Acc) on Xetra
-    "GME":     25.19,
-    "CCEC":    22.00,
-    "NVAX":    8.22,
-    "NIO":     6.24,
-    "RXRX":    3.54,
-    "BDMD":    3.09,
+    #          entry    invested($)
+    "CSWC":    (23.56,  200),
+    "VUAA.DE": (114.05, 115),   # Vanguard S&P 500 UCITS ETF
+    "GME":     (25.19,  200),
+    "CCEC":    (22.00,  200),
+    "XNDU":    (14.80,  139),   # Xanadu Quantum
+    "NVAX":    (8.22,   100),
+    "NIO":     (6.24,   100),
+    "RXRX":    (3.54,   100),
+    "BDMD":    (3.09,   100),
 }
 
 @app.route("/api/portfolio")
 def api_portfolio():
-    """Live P/L for each portfolio position based on entry prices."""
-    results = []
-    tickers = list(MY_PORTFOLIO.keys())
+    """Live P/L with real $ and € amounts based on investment size."""
+    # USD → EUR rate
     try:
-        import yfinance as yf
-        data = yf.download(tickers, period="1d", progress=False)
-        prices = data["Close"].iloc[-1] if not data.empty else {}
+        usdeur = float(yf.Ticker("USDEUR=X").fast_info.last_price)
     except Exception:
-        prices = {}
+        usdeur = 0.90
 
-    total_cost = 0
-    total_value = 0
+    results = []
+    total_invested = total_current = 0.0
 
-    for ticker, entry in MY_PORTFOLIO.items():
+    for ticker, (entry, invested) in MY_PORTFOLIO.items():
         try:
-            current = float(prices[ticker]) if ticker in prices else None
-            if current is None:
-                info = yf.Ticker(ticker).fast_info
-                current = float(getattr(info, "last_price", entry))
-            pl_pct = round((current - entry) / entry * 100, 2)
-            results.append({
-                "ticker":  ticker,
-                "entry":   entry,
-                "current": round(current, 2),
-                "pl_pct":  pl_pct,
-                "pl_abs":  round(current - entry, 2),
-            })
-            total_cost  += entry
-            total_value += current
-        except Exception:
-            results.append({"ticker": ticker, "entry": entry, "current": None, "pl_pct": None, "pl_abs": None})
+            info    = yf.Ticker(ticker).fast_info
+            current = round(float(info.last_price), 3)
+            pre     = None
+            try:
+                p = info.pre_market_price
+                if p and abs(float(p) - current) > 0.001:
+                    pre = round(float(p), 3)
+            except Exception:
+                pass
 
-    overall_pct = round((total_value - total_cost) / total_cost * 100, 2) if total_cost > 0 else 0
+            shares   = invested / entry
+            cur_val  = shares * current
+            pnl_usd  = round(cur_val - invested, 2)
+            pnl_pct  = round(pnl_usd / invested * 100, 2)
+            pnl_eur  = round(pnl_usd * usdeur, 2)
+
+            results.append({
+                "ticker":    ticker,
+                "entry":     entry,
+                "current":   current,
+                "invested":  invested,
+                "shares":    round(shares, 3),
+                "cur_val":   round(cur_val, 2),
+                "pnl_usd":   pnl_usd,
+                "pnl_eur":   pnl_eur,
+                "pnl_pct":   pnl_pct,
+                "pre":       pre,
+            })
+            total_invested += invested
+            total_current  += cur_val
+        except Exception as e:
+            results.append({"ticker": ticker, "entry": entry, "invested": invested,
+                            "pnl_usd": None, "pnl_eur": None, "pnl_pct": None, "pre": None})
+
+    total_pnl_usd = round(total_current - total_invested, 2)
+    total_pnl_eur = round(total_pnl_usd * usdeur, 2)
+    total_pct     = round(total_pnl_usd / total_invested * 100, 2) if total_invested else 0
+
     return jsonify(sanitize({
-        "positions":    results,
-        "overall_pct":  overall_pct,
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "positions":       results,
+        "total_invested":  round(total_invested, 2),
+        "total_pnl_usd":   total_pnl_usd,
+        "total_pnl_eur":   total_pnl_eur,
+        "total_pct":       total_pct,
+        "usdeur":          round(usdeur, 4),
+        "generated_at":    datetime.utcnow().isoformat() + "Z",
     }))
 
 
@@ -1985,6 +2008,7 @@ const UNIVERSE = {
       {t:"VUAA.DE", n:"Vanguard S&P500 UCITS", pl:+5.0},
       {t:"GME",  n:"GameStop",            pl:-4.0},
       {t:"CCEC", n:"Cap Clean Energy",    pl:-7.4},
+      {t:"XNDU", n:"Xanadu Quantum",      pl:-8.8},
       {t:"NVAX", n:"Novanax",             pl:-2.92},
       {t:"NIO",  n:"NIO",                 pl:-4.8},
       {t:"RXRX", n:"Recursion Pharma",    pl:-5.37},
@@ -2037,10 +2061,15 @@ function renderSidebar(tab, filter) {
     html += `<div class="sector-label">${sector}</div>`;
     for (const s of visible) {
       const sel = s.t === currentTicker ? " selected" : "";
-      const plBadge = s.pl != null
-        ? `<span style="font-size:.68rem;font-weight:700;padding:.15rem .4rem;border-radius:4px;
-            background:${s.pl>=0?"rgba(74,222,128,.15)":"rgba(239,68,68,.15)"};
-            color:${s.pl>=0?"var(--buy)":"var(--sell)"};">${s.pl>=0?"+":""}${s.pl}%</span>`
+      const plColor  = s.pl >= 0 ? "var(--buy)" : "var(--sell)";
+      const plBg     = s.pl >= 0 ? "rgba(74,222,128,.12)" : "rgba(239,68,68,.12)";
+      const preTag   = s.pre ? `<span style="font-size:.6rem;color:var(--neutral);margin-right:.2rem;">PRE</span>` : "";
+      const plBadge  = s.pl != null
+        ? `<div style="text-align:right;line-height:1.3;">
+            ${preTag}
+            <div style="font-size:.68rem;font-weight:800;color:${plColor};">${s.pl>=0?"+":""}${s.pl.toFixed(1)}%</div>
+            ${s.pnlUsd!=null?`<div style="font-size:.62rem;color:${plColor};opacity:.85;">${s.pnlUsd>=0?"+":""}$${s.pnlUsd.toFixed(0)}</div>`:""}
+           </div>`
         : "";
       html += `<div class="stock-item${sel}" onclick="selectStock('${s.t}','${s.n.replace(/'/g,"\\\\'")}')" >
         <div style="flex:1;">
@@ -2634,20 +2663,30 @@ function loadPortfolio() {
   fetch("/api/portfolio")
     .then(r => r.json())
     .then(data => {
-      // Update UNIVERSE with live P/L
-      const pnl = {};
-      (data.positions || []).forEach(p => { if (p.pl_pct != null) pnl[p.ticker] = p.pl_pct; });
-      UNIVERSE.us["⭐ My Portfolio"].forEach(s => { if (pnl[s.t] != null) s.pl = pnl[s.t]; });
+      // Update sidebar badges with live pnl_pct + show $ amount
+      const byTicker = {};
+      (data.positions || []).forEach(p => { byTicker[p.ticker] = p; });
+
+      UNIVERSE.us["⭐ My Portfolio"].forEach(s => {
+        const p = byTicker[s.t];
+        if (p && p.pnl_pct != null) {
+          s.pl     = p.pnl_pct;
+          s.pnlUsd = p.pnl_usd;
+          s.pre    = p.pre;
+        }
+      });
       renderSidebar(currentTab, document.getElementById("stock-search").value);
 
-      // Show overall P/L in header
-      const overall = data.overall_pct;
-      if (overall != null) {
-        const el = document.getElementById("portfolio-overall");
-        if (el) {
-          el.textContent = `Portfolio: ${overall >= 0 ? "+" : ""}${overall.toFixed(2)}%`;
-          el.style.color = overall >= 0 ? "var(--buy)" : "var(--sell)";
-        }
+      // Overall summary bar
+      const el = document.getElementById("portfolio-overall");
+      if (el && data.total_pct != null) {
+        const sign = data.total_pct >= 0 ? "+" : "";
+        el.innerHTML =
+          `<span style="color:${data.total_pct>=0?"var(--buy)":"var(--sell)"}">` +
+          `${sign}${data.total_pct.toFixed(1)}% &nbsp;` +
+          `${sign}$${Math.abs(data.total_pnl_usd).toFixed(0)} / ` +
+          `${sign}€${Math.abs(data.total_pnl_eur).toFixed(0)}` +
+          `</span>`;
       }
     }).catch(() => {});
 }
