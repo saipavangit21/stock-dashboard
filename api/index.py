@@ -985,16 +985,10 @@ def api_surge():
 MY_PORTFOLIO = {
     #          entry    invested($)
     "CSWC":    (23.56,  200),
-    "VUAA.DE": (114.05, 115),   # Vanguard S&P 500 UCITS ETF
     "GME":     (25.19,  200),
     "CCEC":    (22.00,  200),
-    "XNDU":    (14.80,  139),   # Xanadu Quantum
-    "NVAX":    (8.22,   100),
     "NIO":     (6.24,   100),
     "RXRX":    (3.54,   100),
-    "BDMD":    (3.09,   100),
-    "PTP.DE":  (3.53,    27),   # Pentixapharm (Frankfurt)
-    "DFTK.DE": (6.03,    43),   # DFTK (Frankfurt)
 }
 
 @app.route("/api/portfolio")
@@ -2005,17 +1999,11 @@ header h1 span{color:var(--accent);}
 const UNIVERSE = {
   us: {
     "⭐ My Portfolio": [
-      {t:"CSWC", n:"Capital Southwest",   pl:+3.1},
-      {t:"VUAA.DE", n:"Vanguard S&P500 UCITS", pl:+5.0},
-      {t:"GME",  n:"GameStop",            pl:-4.0},
-      {t:"CCEC", n:"Cap Clean Energy",    pl:-7.4},
-      {t:"XNDU", n:"Xanadu Quantum",      pl:-8.8},
-      {t:"NVAX", n:"Novanax",             pl:-2.92},
-      {t:"NIO",  n:"NIO",                 pl:-4.8},
-      {t:"RXRX", n:"Recursion Pharma",    pl:-5.37},
-      {t:"BDMD",    n:"Baird Medical",       pl:-40.0},
-      {t:"PTP.DE",  n:"Pentixapharm",        pl:-41.0},
-      {t:"DFTK.DE", n:"DFTK Tradegate",      pl:-71.0},
+      {t:"CSWC", n:"Capital Southwest",  pl:+3.1},
+      {t:"GME",  n:"GameStop",           pl:-4.0},
+      {t:"CCEC", n:"Cap Clean Energy",   pl:-7.4},
+      {t:"NIO",  n:"NIO",                pl:-4.8},
+      {t:"RXRX", n:"Recursion Pharma",   pl:-5.37},
     ],
     Technology:  [{t:"AAPL",n:"Apple"},{t:"MSFT",n:"Microsoft"},{t:"NVDA",n:"NVIDIA"},{t:"AMD",n:"AMD"},{t:"META",n:"Meta"},{t:"GOOGL",n:"Alphabet"},{t:"AMZN",n:"Amazon"},{t:"TSLA",n:"Tesla"}],
     Finance:     [{t:"JPM",n:"JP Morgan"},{t:"BAC",n:"Bank of America"},{t:"GS",n:"Goldman Sachs"},{t:"MS",n:"Morgan Stanley"},{t:"V",n:"Visa"},{t:"MA",n:"Mastercard"}],
