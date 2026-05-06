@@ -2074,10 +2074,15 @@ function renderSidebar(tab, filter) {
             ${s.pnlUsd!=null?`<div style="font-size:.62rem;color:${plColor};opacity:.85;">${s.pnlUsd>=0?"+":""}$${s.pnlUsd.toFixed(0)}</div>`:""}
            </div>`
         : "";
-      html += `<div class="stock-item${sel}" onclick="selectStock('${s.t}','${s.n.replace(/'/g,"\\\\'")}')" >
+      const urgentSell = s.pl != null && s.pl <= -15;
+      const warnSell   = s.pl != null && s.pl < -8 && s.pl > -15;
+      const rowBg = urgentSell ? "background:rgba(239,68,68,.13);border-left:3px solid var(--sell);"
+                  : warnSell   ? "background:rgba(251,146,60,.08);border-left:3px solid var(--neutral);"
+                  : "";
+      html += `<div class="stock-item${sel}" onclick="selectStock('${s.t}','${s.n.replace(/'/g,"\\\\'")}')" style="${rowBg}">
         <div style="flex:1;">
-          <div style="font-weight:700;">${s.t.replace(".NS","")}</div>
-          <div class="stk-name">${s.n}</div>
+          <div style="font-weight:700;">${s.t.replace(".NS","").replace(".DE","")}</div>
+          <div class="stk-name">${s.n}${urgentSell?` <span style="color:var(--sell);font-size:.6rem;font-weight:800;">SELL</span>`:""}</div>
         </div>
         ${plBadge}
       </div>`;
