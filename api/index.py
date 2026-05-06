@@ -993,6 +993,8 @@ MY_PORTFOLIO = {
     "NIO":     (6.24,   100),
     "RXRX":    (3.54,   100),
     "BDMD":    (3.09,   100),
+    "PTP.DE":  (3.53,    27),   # Pentixapharm (Frankfurt)
+    "DFTK.DE": (6.03,    43),   # DFTK (Frankfurt)
 }
 
 @app.route("/api/portfolio")
@@ -2012,7 +2014,9 @@ const UNIVERSE = {
       {t:"NVAX", n:"Novanax",             pl:-2.92},
       {t:"NIO",  n:"NIO",                 pl:-4.8},
       {t:"RXRX", n:"Recursion Pharma",    pl:-5.37},
-      {t:"BDMD", n:"Baird Medical",       pl:-40.0},
+      {t:"BDMD",    n:"Baird Medical",       pl:-40.0},
+      {t:"PTP.DE",  n:"Pentixapharm",        pl:-41.0},
+      {t:"DFTK.DE", n:"DFTK Tradegate",      pl:-71.0},
     ],
     Technology:  [{t:"AAPL",n:"Apple"},{t:"MSFT",n:"Microsoft"},{t:"NVDA",n:"NVIDIA"},{t:"AMD",n:"AMD"},{t:"META",n:"Meta"},{t:"GOOGL",n:"Alphabet"},{t:"AMZN",n:"Amazon"},{t:"TSLA",n:"Tesla"}],
     Finance:     [{t:"JPM",n:"JP Morgan"},{t:"BAC",n:"Bank of America"},{t:"GS",n:"Goldman Sachs"},{t:"MS",n:"Morgan Stanley"},{t:"V",n:"Visa"},{t:"MA",n:"Mastercard"}],
