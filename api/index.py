@@ -1839,9 +1839,9 @@ header h1 span{color:var(--accent);}
       <div class="tab active" id="tab-us"    onclick="switchTab('us')">US</div>
       <div class="tab"        id="tab-india" onclick="switchTab('india')">India</div>
     </div>
-    <div style="padding:.4rem .9rem .2rem;display:flex;justify-content:space-between;align-items:center;">
-      <span style="font-size:.7rem;color:var(--muted);">My Portfolio</span>
-      <span id="portfolio-overall" style="font-size:.72rem;font-weight:700;">—</span>
+    <div style="padding:.5rem .9rem .3rem;">
+      <div style="font-size:.72rem;font-weight:700;color:var(--muted);margin-bottom:.2rem;">MY PORTFOLIO</div>
+      <div id="portfolio-overall" style="line-height:1.5;">—</div>
     </div>
     <input id="stock-search" placeholder="Search ticker or name…" oninput="filterStocks(this.value)"/>
     <div id="stock-list"></div>
@@ -2680,13 +2680,15 @@ function loadPortfolio() {
       // Overall summary bar
       const el = document.getElementById("portfolio-overall");
       if (el && data.total_pct != null) {
-        const sign = data.total_pct >= 0 ? "+" : "";
+        const pnlSign  = data.total_pnl_usd >= 0 ? "+" : "-";
+        const pnlColor = data.total_pnl_usd >= 0 ? "var(--buy)" : "var(--sell)";
+        const curVal   = (data.total_invested + data.total_pnl_usd).toFixed(0);
         el.innerHTML =
-          `<span style="color:${data.total_pct>=0?"var(--buy)":"var(--sell)"}">` +
-          `${sign}${data.total_pct.toFixed(1)}% &nbsp;` +
-          `${sign}$${Math.abs(data.total_pnl_usd).toFixed(0)} / ` +
-          `${sign}€${Math.abs(data.total_pnl_eur).toFixed(0)}` +
-          `</span>`;
+          `<div style="font-size:.68rem;color:var(--muted);">$${data.total_invested.toFixed(0)} invested</div>` +
+          `<div style="font-size:.72rem;color:${pnlColor};font-weight:700;">` +
+          `P&amp;L ${pnlSign}$${Math.abs(data.total_pnl_usd).toFixed(0)} / ${pnlSign}€${Math.abs(data.total_pnl_eur).toFixed(0)} ` +
+          `(${data.total_pct >= 0 ? "+" : ""}${data.total_pct.toFixed(1)}%)` +
+          `</div>`;
       }
     }).catch(() => {});
 }
