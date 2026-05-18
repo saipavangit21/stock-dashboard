@@ -989,6 +989,7 @@ MY_PORTFOLIO = {
     "CCEC":    (22.00,  200),
     "NIO":     (6.24,   100),
     "RXRX":    (3.54,   100),
+    "CSG.AS":  (16.29,  107),   # CSG NV — Euronext Amsterdam (~€100)
 }
 
 @app.route("/api/portfolio")
@@ -2003,7 +2004,8 @@ const UNIVERSE = {
       {t:"GME",  n:"GameStop",           pl:-4.0},
       {t:"CCEC", n:"Cap Clean Energy",   pl:-7.4},
       {t:"NIO",  n:"NIO",                pl:-4.8},
-      {t:"RXRX", n:"Recursion Pharma",   pl:-5.37},
+      {t:"RXRX",   n:"Recursion Pharma",  pl:-5.37},
+      {t:"CSG.AS", n:"CSG NV",           pl:-1.7},
     ],
     Technology:  [{t:"AAPL",n:"Apple"},{t:"MSFT",n:"Microsoft"},{t:"NVDA",n:"NVIDIA"},{t:"AMD",n:"AMD"},{t:"META",n:"Meta"},{t:"GOOGL",n:"Alphabet"},{t:"AMZN",n:"Amazon"},{t:"TSLA",n:"Tesla"}],
     Finance:     [{t:"JPM",n:"JP Morgan"},{t:"BAC",n:"Bank of America"},{t:"GS",n:"Goldman Sachs"},{t:"MS",n:"Morgan Stanley"},{t:"V",n:"Visa"},{t:"MA",n:"Mastercard"}],
